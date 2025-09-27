@@ -5,6 +5,8 @@ on:
     paths:
       - 'software/**'
 
+  workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
