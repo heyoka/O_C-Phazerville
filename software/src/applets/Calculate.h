@@ -19,16 +19,26 @@
 // SOFTWARE.
 
 // Arithmetic functions and typedef to function pointer
-#define HEMISPHERE_NUMBER_OF_CALC 7
 int hem_MIN(int v1, int v2) {return (v1 < v2) ? v1 : v2;}
 int hem_MAX(int v1, int v2) {return (v1 > v2) ? v1 : v2;}
-int hem_SUM(int v1, int v2) {return constrain(v1 + v2, -HEMISPHERE_MAX_CV, HEMISPHERE_MAX_CV);}
+int hem_SUM(int v1, int v2) {return constrain(v1 + v2, HEMISPHERE_MIN_CV, HEMISPHERE_MAX_CV);}
 int hem_DIFF(int v1, int v2) {return hem_MAX(v1, v2) - hem_MIN(v1, v2);}
 int hem_MEAN(int v1, int v2) {return (v1 + v2) / 2;}
 typedef int(*CalcFunction)(int, int);
 
 class Calculate : public HemisphereApplet {
 public:
+    enum CalcFunctions : uint8_t {
+      MIN_FN,
+      MAX_FN,
+      SUM_FN,
+      DIFF_FN,
+      MEAN_FN,
+      S_AND_H_FN,
+      RND_UNI_FN,
+      RND_BI_FN,
+      CALC_FN_COUNT
+    };
 
     const char* applet_name() {
         return "Calculate";
@@ -47,11 +57,12 @@ public:
     void Controller() {
         ForEachChannel(ch)
         {
-            int idx = operation[ch];
+            const uint8_t &idx = operation[ch];
 
             if (idx == 5) { // S&H
-                if (Clock(ch)) Out(ch, In(ch));
-            } else if (idx == 6) { // Rand
+                if (Clock(ch)) StartADCLag(ch);
+                if (EndOfADCLag(ch)) Out(ch, In(ch));
+            } else if (idx >= 6) { // Rand
                 // The first time a clock comes in, Rand becomes clocked.
                 // Otherwise, Rand is unclocked, and outputs a random value with each tick.
 
@@ -62,8 +73,12 @@ public:
                 else if (ch == 1 && rand_clocked[0] && !rand_clocked[1]) // normalled clock input from TR1 for channel 2
                     recalc = Clock(0);
 
-                if (recalc)
+                if (recalc) {
+                  if (idx == 6) // unipolar
                     Out(ch, random(0, HEMISPHERE_MAX_CV));
+                  else // bipolar
+                    Out(ch, random(0, HEMISPHERE_MAX_CV - HEMISPHERE_MIN_CV) + HEMISPHERE_MIN_CV);
+                }
             } else if (idx < 5) {
                 int result = calc_fn[idx](In(0), In(1));
                 Out(ch, result);
@@ -83,7 +98,7 @@ public:
             MoveCursor(selected, direction, 1);
             return;
         }
-        operation[selected] = constrain(operation[selected] + direction, 0, HEMISPHERE_NUMBER_OF_CALC - 1);
+        operation[selected] = constrain(operation[selected] + direction, 0, CALC_FN_COUNT - 1);
         rand_clocked[selected] = 0;
     }
 
@@ -95,8 +110,8 @@ public:
     }
 
     void OnDataReceive(uint64_t data) {
-        operation[0] = constrain(Unpack(data, PackLocation {0, 8}), 0, HEMISPHERE_NUMBER_OF_CALC - 1);
-        operation[1] = constrain(Unpack(data, PackLocation {8, 8}), 0, HEMISPHERE_NUMBER_OF_CALC - 1);
+        operation[0] = constrain(Unpack(data, PackLocation {0, 8}), 0, CALC_FN_COUNT - 1);
+        operation[1] = constrain(Unpack(data, PackLocation {8, 8}), 0, CALC_FN_COUNT - 1);
     }
 
 protected:
@@ -114,13 +129,9 @@ protected:
   }
 
 private:
-    const char* const op_name[HEMISPHERE_NUMBER_OF_CALC] = {"Min", "Max", "Sum", "Diff", "Mean", "S&H", "Rnd"};
-    // hem_MIN goes in the Rand and S&H slots, because those are handled in Controller() and
-    // don't need functions. But providing 0 isn't safe because the encoder change can
-    // happen any time and cause the system to try to run one of those null functions.
-    CalcFunction calc_fn[HEMISPHERE_NUMBER_OF_CALC] = {hem_MIN, hem_MAX, hem_SUM, hem_DIFF, hem_MEAN, hem_MIN, hem_MIN};
-    int hold[2];
-    int operation[2];
+    const char* const op_name[CALC_FN_COUNT] = {"Min", "Max", "Sum", "Diff", "Mean", "S&H", "Rnd+", "-Rnd+"};
+    const CalcFunction calc_fn[5] = {hem_MIN, hem_MAX, hem_SUM, hem_DIFF, hem_MEAN};
+    uint8_t operation[2];
     int selected;
     bool rand_clocked[2];
 
@@ -130,7 +141,7 @@ private:
         {
             gfxPrint(31 * ch, 15, op_name[operation[ch]]);
             // Show the icon if this random calculator is clocked
-            if (operation[ch] == 6 && rand_clocked[ch]) gfxIcon(20 + 31 * ch, 15, CLOCK_ICON);
+            if (operation[ch] >= 6 && rand_clocked[ch]) gfxIcon(8 + 31 * ch, 25, CLOCK_ICON);
 
             if (ch == selected) gfxCursor(0 + (31 * ch), 23, 30);
         }

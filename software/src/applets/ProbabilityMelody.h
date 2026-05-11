@@ -106,25 +106,21 @@ public:
         rotation[1] = semitone_cv_in((cvm >> 4) & 0b11);
         down_mod = constrain(down + semitone_cv_in((cvm >> 2) & 0b11), 1, up);
         up_mod = constrain(up + semitone_cv_in(cvm & 0b11), down_mod, HEM_PROB_MEL_MAX_RANGE);
-
-        // regen when looping was enabled from ProbDiv
-        bool regen = loop_linker.IsLooping() && !isLooping;
-        isLooping = loop_linker.IsLooping();
-
         // reseed from ProbDiv
-        regen = regen || loop_linker.ShouldReseed();
+        regen = regen || loop_linker.ShouldRegenerate();
 
         // reseed loop if range has changed due to CV
-        regen = regen || (isLooping && (down_mod != oldDown || up_mod != oldUp));
+        regen = regen || (loop_linker.IsLooping() && (down_mod != oldDown || up_mod != oldUp));
 
         if (regen) {
+            regen = false;
             GenerateLoop();
         }
 
         ForEachChannel(ch) {
             if (Clock(ch)) StartADCLag(ch);
             if (loop_linker.TrigPop(ch) || EndOfADCLag(ch)) {
-                if (isLooping) {
+                if (loop_linker.IsLooping()) {
                     pitch[ch] = seqloop[ch][loop_linker.GetLoopStep()];
                 } else {
                     pitch[ch] = GetNextWeightedPitch();
@@ -177,8 +173,8 @@ public:
               ); // -1 removes note from mask
               value_animation = HEMISPHERE_CURSOR_TICKS;
         }
-        if (isLooping) {
-            GenerateLoop(); // regenerate loop on any param changes
+        if (loop_linker.IsLooping()) {
+            regen = true; // regenerate loop on any param changes
         }
     }
 
@@ -223,10 +219,10 @@ private:
     int8_t up, up_mod;
     int8_t down, down_mod;
     uint8_t pitch[2] = {0};
-    bool isLooping = false;
     uint8_t seqloop[2][HEM_PROB_MEL_MAX_LOOP_LENGTH];
     int8_t rotation[2] = {0};
     int8_t cv_mode = 0;
+    bool regen = false;
 
     ProbLoopLinker &loop_linker = ProbLoopLinker::get();
 
@@ -328,6 +324,14 @@ private:
     }
 
     void GenerateLoop() {
+        int full_seed = 0;
+        for (int p = 0; p < 12; p++) {
+            full_seed ^= (weights[p] + 1) << p; // add 1 to weights to offset negative values
+        }
+
+        full_seed ^= ((up_mod << 6) | down_mod);
+        full_seed |= (loop_linker.GetSeed() << 16);
+        randomSeed(full_seed);
         // always fill the whole loop to make things easier
         for (int i = 0; i < HEM_PROB_MEL_MAX_LOOP_LENGTH; ++i) {
             seqloop[0][i] = GetNextWeightedPitch();
@@ -408,20 +412,20 @@ private:
             graphics.printf("%s", probmelod::cv_modes[cv_mode].cv1_label);
             gfxPos(32, 15);
             graphics.printf("%5s", probmelod::cv_modes[cv_mode].cv2_label);
-            gfxCursor(1, 23, 62);
+            gfxCursor(1, 23, 62, "CV Mode");
         } else {
             gfxIcon(0, 13, DOWN_BTN_ICON);
             gfxIcon(30, 16, UP_BTN_ICON);
 
             if (cursor == LOWER) {
                 gfxPrintOctDotSemi(8, 15, down);
-                gfxCursor(9, 23, 21);
+                gfxCursor(9, 23, 21, "Lower");
             } else {
                 gfxPrintOctDotSemi(8, 15, down_mod);
             }
             if (cursor == UPPER) {
                 gfxPrintOctDotSemi(38, 15, up);
-                gfxCursor(39, 23, 21);
+                gfxCursor(39, 23, 21, "Upper");
             } else {
                 gfxPrintOctDotSemi(38, 15, up_mod);
             }

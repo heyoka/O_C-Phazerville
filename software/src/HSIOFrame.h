@@ -10,6 +10,7 @@
 #pragma once
 
 #include <vector>
+#include "OC_config.h"
 #include "HSMIDI.h"
 #include "HSUtils.h"
 #include "OC_DAC.h"
@@ -17,6 +18,7 @@
 #include "OC_digital_inputs.h"
 #include "HSicons.h"
 #include "HSClockManager.h"
+#include "util/util_macros.h"
 
 namespace HS {
 
@@ -68,6 +70,9 @@ struct MIDIMapSettings {
   uint8_t range_low, range_high;
 };
 struct MIDIMapping : public MIDIMapSettings {
+  MIDIMapping() {}
+  ~MIDIMapping() {}
+
   static constexpr size_t Size = 64; // Make this compatible with Packable
 
   // state
@@ -104,8 +109,27 @@ struct MIDIMapping : public MIDIMapSettings {
     return (note >= range_low && note <= range_high);
   }
 
+  void AdjustChannel(int dir) {
+    channel = constrain(channel + dir, 0, 16);
+  }
+  void AdjustFunction(int dir) {
+    function = constrain(function + dir, 0, HEM_MIDI_MAX_FUNCTION);
+    if (function == HEM_MIDI_CC_OUT)
+      function_cc = -1; // auto-learn MIDI CC
+  }
+
+  void AdjustVoice(int dir) {
+    dac_polyvoice = constrain(dac_polyvoice + dir, 0, DAC_CHANNEL_COUNT - 1);
+  }
+
+  void AutoLearn() {
+    channel = 16; // omni
+    function = HEM_MIDI_LEARN;
+    function_cc = -1; // auto-learn MIDI CC or precise NoteOn
+  }
+
   void AdjustTranspose(int dir) {
-    transpose = constrain(transpose + dir, -24, 24);
+    transpose = constrain(transpose + dir, -48, 48);
   }
   void AdjustRangeLow(int dir) {
     range_low = constrain(range_low + dir, 0, range_high);
@@ -125,6 +149,8 @@ struct MIDIMapping : public MIDIMapSettings {
     if (range_low == 0 && range_high == 0) range_high = 127;
     if (range_high < range_low) range_high = range_low;
   }
+
+  DISALLOW_COPY_AND_ASSIGN(MIDIMapping);
 };
 
 // Lets PackingUtils know this is Packable as is.
@@ -172,7 +198,8 @@ struct MIDIFrame {
         mapping[ch].range_high = 127;
       }
       for (int ch = 0; ch < ADC_CHANNEL_COUNT; ++ch) {
-        outmap[ch].function = HEM_MIDI_NOOP;
+        outmap[ch].function = (ch & 1) ? HEM_MIDI_GATE_OUT : HEM_MIDI_NOTE_OUT;
+        outmap[ch].function_cc = ch + 1;
         outmap[ch].transpose = 0;
         outmap[ch].output = 0;
         outmap[ch].range_low = 0;
@@ -387,36 +414,10 @@ struct MIDIFrame {
     }
 
     // MIDI output stuff
-    int outchan[DAC_CHANNEL_COUNT] = {
-        0, 0, 1, 1,
-#ifdef ARDUINO_TEENSY41
-        2, 2, 3, 3,
-#endif
-    };
-    int outchan_last[DAC_CHANNEL_COUNT] = {
-        0, 0, 1, 1,
-#ifdef ARDUINO_TEENSY41
-        2, 2, 3, 3,
-#endif
-    };
-    int outfn[DAC_CHANNEL_COUNT] = {
-        HEM_MIDI_NOTE_OUT, HEM_MIDI_GATE_OUT,
-        HEM_MIDI_NOTE_OUT, HEM_MIDI_GATE_OUT,
-#ifdef ARDUINO_TEENSY41
-        HEM_MIDI_NOTE_OUT, HEM_MIDI_GATE_OUT,
-        HEM_MIDI_NOTE_OUT, HEM_MIDI_GATE_OUT,
-#endif
-    };
-    uint8_t outccnum[DAC_CHANNEL_COUNT] = {
-        1, 1, 1, 1,
-#ifdef ARDUINO_TEENSY41
-        5, 6, 7, 8,
-#endif
-    };
+    int outchan_last[DAC_CHANNEL_COUNT];
     uint8_t current_note[16]; // note number, per MIDI channel
     uint8_t current_ccval[DAC_CHANNEL_COUNT]; // level 0 - 127, per DAC channel
     int note_countdown[DAC_CHANNEL_COUNT];
-    int inputs[DAC_CHANNEL_COUNT]; // CV to be translated
     int last_cv[DAC_CHANNEL_COUNT];
     bool clocked[DAC_CHANNEL_COUNT];
     bool gate_high[DAC_CHANNEL_COUNT];
@@ -441,7 +442,7 @@ struct MIDIFrame {
     }
 
     void ProcessMIDIMsg(const MIDIMessage msg);
-    void Send(const int *outvals);
+    void Send(const SlewedValue *outvals);
 
     void SendAfterTouch(const uint8_t midi_ch, uint8_t val) {
         usbMIDI.sendAfterTouch(val, midi_ch + 1);
@@ -491,6 +492,8 @@ struct IOFrame {
     // settings
     bool autoMIDIOut = false;
     uint8_t clockskip[DAC_CHANNEL_COUNT] = {0};
+    int8_t output_slew[DAC_CHANNEL_COUNT] = {0};
+    int8_t output_atten[DAC_CHANNEL_COUNT]; // -126 (-200%) to 126 (+200%), 63 is 100%
 
     // pre-calculated clocks, subject to trigger mapping
     bool clocked[OC::DIGITAL_INPUT_LAST + ADC_CHANNEL_COUNT];
@@ -500,9 +503,7 @@ struct IOFrame {
     int inputs[ADC_CHANNEL_COUNT];
 
     // output value cache, countdowns
-    int outputs[DAC_CHANNEL_COUNT];
-    int output_diff[DAC_CHANNEL_COUNT];
-    int outputs_smooth[DAC_CHANNEL_COUNT];
+    SlewedValue outputs[DAC_CHANNEL_COUNT]; // now with Extra Precision!
     int clock_countdown[DAC_CHANNEL_COUNT];
     int adc_lag_countdown[ADC_CHANNEL_COUNT]; // Time between a clock event and an ADC read event
     // calculated values
@@ -516,22 +517,33 @@ struct IOFrame {
 
     void Init() {
       MIDIState.Init();
+      for (int i = 0; i < DAC_CHANNEL_COUNT; ++i) {
+        output_atten[i] = 60; // default to 100%
+      }
     }
 
+    const int ViewOut(DAC_CHANNEL ch) const { return outputs[ch].get(output_atten[ch]); }
+
     // --- Soft IO ---
-    void Out(DAC_CHANNEL channel, int value) {
-        output_diff[channel] += value - outputs[channel];
-        outputs[channel] = value;
+    void Out(DAC_CHANNEL channel, int value, bool override = false) {
+      outputs[channel].set(value, override);
     }
     void ClockOut(DAC_CHANNEL ch, const int pulselength = HEMISPHERE_CLOCK_TICKS * trig_length) {
         // short circuit if skip probability is zero to avoid consuming random numbers
         if (0 == clockskip[ch] || random(100) >= clockskip[ch]) {
             clock_countdown[ch] = pulselength;
-            outputs[ch] = PULSE_VOLTAGE * (12 << 7);
+            // assign to both to override slew - instant attack
+            Out(ch, HEMISPHERE_MAX_CV, true);
         }
     }
     void NudgeSkip(int ch, int dir) {
         clockskip[ch] = constrain(clockskip[ch] + dir, 0, 100);
+    }
+    void NudgeSlew(int ch, int dir) {
+        output_slew[ch] = constrain(output_slew[ch] + dir, 0, 100);
+    }
+    void NudgeAtten(int ch, int dir) {
+        output_atten[ch] = constrain(output_atten[ch] + dir, -127, 127);
     }
 
     // --- Hard IO ---
@@ -544,9 +556,12 @@ struct IOFrame {
           DAC_CHANNEL_E, DAC_CHANNEL_F, DAC_CHANNEL_G, DAC_CHANNEL_H,
 #endif
         };
+
         for (int i = 0; i < DAC_CHANNEL_COUNT; ++i) {
-            OC::DAC::set_pitch_scaled(chan[i], outputs[i], 0);
+          outputs[i].push(output_slew[i]);
+          OC::DAC::set_pitch_scaled(chan[i], outputs[i].get(output_atten[i]), 0);
         }
+        // oh no, this is certainly broken now...
         if (autoMIDIOut) MIDIState.Send(outputs);
     }
 
@@ -554,6 +569,6 @@ struct IOFrame {
 
 extern IOFrame frame;
 
-#include <CVInputMap.h>
+#include "CVInputMap.h"
 
 } // namespace HS

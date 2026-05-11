@@ -21,6 +21,8 @@
 // SOFTWARE.
 
 #include "OC_core.h"
+#include "OC_gpio.h"
+#include "OC_scales.h"
 #include "OC_ui.h"
 #include "OC_apps.h"
 #include "OC_menus.h"
@@ -31,6 +33,7 @@
 #include "OC_patterns.h"
 #include "enigma/TuringMachine.h"
 #include "src/drivers/FreqMeasure/OC_FreqMeasure.h"
+#include "util/util_misc.h"
 #include "util/util_pagestorage.h"
 #include "util/EEPROMStorage.h"
 #include "PhzConfig.h"
@@ -43,8 +46,9 @@ namespace menu = OC::menu;
 
 #ifdef ARDUINO_TEENSY41
 #include "APP_QUADRANTS.h"
-#endif
+#else
 #include "APP_HEMISPHERE.h"
+#endif
 
 #endif
 
@@ -69,7 +73,9 @@ namespace menu = OC::menu;
 #include "APP_ENIGMA.h"
 #include "APP_NeuralNetwork.h"
 #include "APP_SCALEEDITOR.h"
+#ifndef NO_HEMISPHERE
 #include "APP_WAVEFORMEDITOR.h"
+#endif
 #include "APP_PONGGAME.h"
 #include "APP_Backup.h"
 #include "APP_SETTINGS.h"
@@ -94,8 +100,9 @@ static constexpr OC::App available_apps[] = {
 #ifndef NO_HEMISPHERE
   #ifdef ARDUINO_TEENSY41
   DECLARE_APP('Q','S', "Quadrants", QUADRANTS),
-  #endif
+  #else
   DECLARE_APP('H','S', "Hemispheres", HEMISPHERE),
+  #endif
 #endif
 
   #ifdef ENABLE_APP_CALIBR8OR
@@ -162,7 +169,9 @@ static constexpr OC::App available_apps[] = {
   DECLARE_APP('N','N', "Neural Net", NeuralNetwork),
   #endif
   DECLARE_APP('S','C', "Scale Editor", SCALEEDITOR),
+#ifndef NO_HEMISPHERE
   DECLARE_APP('W','A', "Waveform Editor", WaveformEditor),
+#endif
   #ifdef ENABLE_APP_PONG
   DECLARE_APP('P','O', "Pong", PONGGAME),
   #endif
@@ -199,7 +208,9 @@ struct GlobalSettings {
 #else
   HS::TuringMachine user_turing_machines[HS::TURING_MACHINE_COUNT];
 #endif
+#ifndef NO_HEMISPHERE
   HS::VOSegment user_waveforms[HS::VO_SEGMENT_COUNT];
+#endif
   OC::Autotune_data auto_calibration_data[DAC_CHANNEL_LAST];
 
   HS::QuantEngineSettings q_engines[QUANT_CHANNEL_COUNT];
@@ -256,6 +267,7 @@ DMAMEM AppDataStorage app_data_storage;
 static constexpr int DEFAULT_APP_INDEX = 1;
 static const uint16_t DEFAULT_APP_ID = available_apps[DEFAULT_APP_INDEX].id;
 
+FLASHMEM
 void save_global_settings() {
   SERIAL_PRINTLN("Saving global settings...");
 
@@ -265,6 +277,7 @@ void save_global_settings() {
 
   // Metadata
   uint64_t data = 0;
+  global_settings.DAC_scaling = OC::DAC::store_scaling();
   Pack(data, PackLocation{0, 16}, global_settings.current_app_id);
   Pack(data, PackLocation{16, 1}, global_settings.encoders_enable_acceleration);
   // 15 bits empty...
@@ -272,6 +285,7 @@ void save_global_settings() {
   PhzConfig::setValue(METADATA_KEY, data);
 
   // User Scales
+  char filename[] = "000.SCL";
   for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
     PhzConfig::setValue(USER_SCALES_KEY | (i << 4) | SCALE_METADATA, uint64_t(user_scales[i].span) << 16 | user_scales[i].num_notes);
     data = 0;
@@ -283,6 +297,16 @@ void save_global_settings() {
         PhzConfig::setValue(USER_SCALES_KEY | (i << 4) | (SCALE_NOTEDATA + (nn >> 2)), data);
         data = 0;
       }
+    }
+
+    if (SDcard_Ready) {
+      filename[2] = char('0' + i);
+      SD.remove(filename);
+      File file = SD.open(filename, FILE_WRITE_BEGIN);
+      if (file) {
+        Scales::SaveToScala(user_scales[i], file);
+      }
+      file.close();
     }
   }
 
@@ -352,7 +376,9 @@ void save_global_settings() {
 #else
   memcpy(global_settings.user_turing_machines, HS::user_turing_machines, sizeof(HS::user_turing_machines));
 #endif
+#ifndef NO_HEMISPHERE
   memcpy(global_settings.user_waveforms, HS::user_waveforms, sizeof(HS::user_waveforms));
+#endif
   memcpy(global_settings.auto_calibration_data, OC::auto_calibration_data, sizeof(OC::auto_calibration_data));
   // scaling settings:
   global_settings.DAC_scaling = OC::DAC::store_scaling();
@@ -390,6 +416,7 @@ static constexpr size_t total_storage_size() {
 static constexpr size_t totalsize = total_storage_size();
 static_assert(totalsize < OC::AppData::kAppDataSize, "EEPROM Allocation Exceeded");
 
+FLASHMEM
 void save_app_data() {
   save_global_settings(); // yeah, why not
 
@@ -427,6 +454,7 @@ void save_app_data() {
   SERIAL_PRINTLN("Saved app settings in page_index %d", app_data_storage.page_index());
 }
 
+FLASHMEM
 void restore_app_data() {
   SERIAL_PRINTLN("Restoring app data from page_index %d, used=%u", app_data_storage.page_index(), app_settings.used);
 
@@ -475,6 +503,7 @@ void restore_app_data() {
 
 namespace apps {
 
+FLASHMEM
 void set_current_app(int index) {
   current_app = &available_apps[index];
   global_settings.current_app_id = current_app->id;
@@ -501,14 +530,22 @@ int index_of(uint16_t id) {
   return i;
 }
 
+FLASHMEM
 void Init(bool reset_settings) {
+
+  SERIAL_PRINTLN("[App Initializations]");
 
   Scales::Init();
   AUTOTUNE::Init();
   HS::Init();
-  for (auto &app : available_apps)
+  for (auto &app : available_apps) {
+    SERIAL_PRINTLN("Starting App: %s", app.name);
     app.Init();
+  }
 
+#ifndef NO_HEMISPHERE
+  HS::showhide_cursor.Init(0, HEMISPHERE_AVAILABLE_APPLETS - 1);
+#endif
   HS::frame.Init();
 
   global_settings.current_app_id = DEFAULT_APP_ID;
@@ -516,6 +553,7 @@ void Init(bool reset_settings) {
   global_settings.reserved0 = false;
   global_settings.reserved1 = false;
   global_settings.DAC_scaling = VOLTAGE_SCALING_1V_PER_OCT;
+  memset(HS::user_turing_machines, 0, sizeof(HS::user_turing_machines));
 
   if (reset_settings) {
     if (ui.ConfirmReset()) {
@@ -539,6 +577,21 @@ void Init(bool reset_settings) {
 
   if (!reset_settings) {
 #ifdef __IMXRT1062__
+    bool scala_file_loaded[Scales::SCALE_USER_COUNT] = {false};
+
+    // User Scales
+    char filename[] = "000.SCL";
+    for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
+      if (SDcard_Ready && SD.exists(filename)) {
+        filename[2] = char('0' + i);
+        File file = SD.open(filename);
+        if (file) {
+          Scales::LoadScala(user_scales[i], file);
+          scala_file_loaded[i] = true;
+        }
+        file.close();
+      }
+    }
     PhzConfig::load_config(); // use default config file
 
     // Metadata
@@ -548,11 +601,13 @@ void Init(bool reset_settings) {
       global_settings.encoders_enable_acceleration = Unpack(data, PackLocation{16, 1});
       // 15 bits empty...
       global_settings.DAC_scaling = Unpack(data, PackLocation{32, 32});
+      OC::DAC::restore_scaling(global_settings.DAC_scaling);
 
       // User Scales
       for (size_t i = 0; i < Scales::SCALE_USER_COUNT; ++i) {
-        if (!PhzConfig::getValue(USER_SCALES_KEY | (i << 4) | SCALE_METADATA, data))
-          break;
+        if (scala_file_loaded[i] ||
+            !PhzConfig::getValue(USER_SCALES_KEY | (i << 4) | SCALE_METADATA, data))
+            continue;
 
         user_scales[i].span = (data >> 16) & 0xffff;
         user_scales[i].num_notes = data & 0x00ff;
@@ -647,15 +702,15 @@ void Init(bool reset_settings) {
       memcpy(user_patterns, global_settings.user_patterns, sizeof(user_patterns));
 #ifdef ENABLE_APP_CHORDS
       memcpy(user_chords, global_settings.user_chords, sizeof(user_chords));
-      Chords::Validate();
 #else
       memcpy(HS::user_turing_machines, global_settings.user_turing_machines, sizeof(HS::user_turing_machines));
 #endif
+#ifndef NO_HEMISPHERE
       memcpy(HS::user_waveforms, global_settings.user_waveforms, sizeof(HS::user_waveforms));
+#endif
       memcpy(auto_calibration_data, global_settings.auto_calibration_data, sizeof(auto_calibration_data));
       DAC::choose_calibration_data(); // either use default data, or auto_calibration_data
       DAC::restore_scaling(global_settings.DAC_scaling); // recover output scaling settings
-      Scales::Validate();
 
       // restore q_engines and midi_maps
       for (int i = 0; i < QUANT_CHANNEL_COUNT; ++i) {
@@ -693,6 +748,16 @@ void Init(bool reset_settings) {
     }
   }
 
+  // Validation to guard against junk data
+  Chords::Validate();
+  Scales::Validate();
+#ifndef NO_HEMISPHERE
+  WaveformManager::Validate();
+#endif
+  for (int i = 0; i < HS::TURING_MACHINE_COUNT; ++i) {
+    HS::user_turing_machines[i].Validate();
+  }
+
   int current_app_index = apps::index_of(global_settings.current_app_id);
   if (current_app_index < 0 || current_app_index >= NUM_AVAILABLE_APPS) {
     SERIAL_PRINTLN("App id %02x not found, using default!", global_settings.current_app_id);
@@ -720,6 +785,7 @@ void draw_save_message(uint8_t c) {
   GRAPHICS_END_FRAME();
 }
 
+FLASHMEM
 bool Ui::AppSettings(bool drawmenu) {
   static menu::ScreenCursor<5> cursor;
   static bool change_app = false;
@@ -844,6 +910,7 @@ bool Ui::AppSettings(bool drawmenu) {
   return false; // close menu
 }
 
+FLASHMEM
 bool Ui::ConfirmReset() {
 
   SetButtonIgnoreMask();
@@ -886,6 +953,7 @@ bool Ui::ConfirmReset() {
   return confirm;
 }
 
+FLASHMEM
 void start_calibration() {
   OC::apps::set_current_app(0); // switch to Settings app
   Settings_instance.StartCalibration(); // Set up calibration mode in Settings app

@@ -1,5 +1,4 @@
-#include "HSUtils.h"
-#include "HemisphereAudioApplet.h"
+#include "../src/Audio/filter_variable2.h"
 
 template <AudioChannels Channels>
 class FilterFolderApplet : public HemisphereAudioApplet {
@@ -18,6 +17,19 @@ public:
 
     CURSOR_MAX = AMP_CV
   };
+  enum FiltMode : uint8_t {
+    FILT_BYPASS,
+    FILT_LPF,
+    FILT_BPF,
+    FILT_HPF,
+    FILT_TILT,
+    FILT_DJ,
+
+    FILT_MODE_COUNT
+  };
+  const char * const modename[FILT_MODE_COUNT] = {
+    "", "+LPF", "+BPF", "+HPF", "+Tilt", "+DJ"
+  };
 
   const char* applet_name() {
     return "Fold/MMF";
@@ -25,17 +37,25 @@ public:
 
   void Start() {
     for (int i = 0; i < Channels; i++) {
-      in_conns[i].connect(input, i, filtfolder[i].folder, 0);
-      out_conns[i].connect(filtfolder[i].mixer, 0, output, i);
+      PatchCable(input, i, filtfolder[i].folder, 0);
+      filtfolder[i].Start(this);
+      PatchCable(filtfolder[i].mixer, 0, output, i);
     }
   }
 
   void Controller() {
-    const bool tiltmode = filtfolder[0].modesel > 3;
-    const int bias = tiltmode ? tiltbias + res_cv.InRescaled(LVL_MAX_DB) : 0;
+    const int cv = pitch + pitch_cv.In();
+    const bool tiltmode = filtfolder[0].modesel == FILT_TILT;
+    const bool djmode = filtfolder[0].modesel == FILT_DJ;
+    const int bias = tiltmode ? tiltbias + res_cv.InRescaled(LVL_MAX_DB)
+                              : (djmode ? cv > 0 : 0);
 
     for (int i = 0; i < Channels; i++) {
-      filtfolder[i].filter.frequency(PitchToRatio(pitch + pitch_cv.In()) * C3);
+      if (filtfolder[i].modesel == FILT_DJ) {
+        filtfolder[i].filter.frequency(PitchToRatio((cv<0)*8*ONE_OCTAVE + cv) * C0);
+      } else
+        filtfolder[i].filter.frequency(PitchToRatio(cv) * C3);
+
       if (tiltmode) {
         filtfolder[i].filter.resonance(0.70);
       } else {
@@ -50,9 +70,6 @@ public:
   }
 
   void View() {
-    const char * const modename[] = {
-      "", "+LPF", "+BPF", "+HPF", "+Tilt"
-    };
     const int label_x = 1;
     int label_y = 15;
 
@@ -71,7 +88,8 @@ public:
     gfxPrint(modename[filtfolder[0].modesel]);
     gfxEndCursor(cursor == FILTMODE);
 
-    if (filtfolder[0].modesel) {
+    switch (filtfolder[0].modesel) {
+      default:
       label_y += 10;
       gfxStartCursor(label_x, label_y);
       gfxPrintPitchHz(pitch);
@@ -81,7 +99,8 @@ public:
       gfxEndCursor(cursor == FILTER_FREQ_CV, false, pitch_cv.InputName());
 
       label_y += 10;
-      if (filtfolder[0].modesel < 4) {
+      if (filtfolder[0].modesel < FILT_TILT
+          || filtfolder[0].modesel == FILT_DJ) {
         gfxPrint(label_x, label_y, "Res: ");
         gfxStartCursor();
         graphics.printf("%3d%%", res);
@@ -98,6 +117,9 @@ public:
         gfxPrint(res_cv);
         gfxEndCursor(cursor == FILTER_RES_CV, false, res_cv.InputName());
       }
+
+      case FILT_BYPASS:
+        break;
     }
 
     label_y += 10;
@@ -127,7 +149,7 @@ public:
     if (!EditMode()) {
       do {
         MoveCursor(cursor, direction, CURSOR_MAX);
-      } while (0 == filtfolder[0].modesel && cursor >= FILTER_FREQ && cursor <= FILTER_RES_CV);
+      } while (FILT_BYPASS == filtfolder[0].modesel && cursor >= FILTER_FREQ && cursor <= FILTER_RES_CV);
       return;
     }
     if (EditSelectedInputMap(direction)) return;
@@ -142,7 +164,7 @@ public:
         pitch_cv.ChangeSource(direction);
         break;
       case FILTER_RES:
-        if (filtfolder[0].modesel > 3)
+        if (filtfolder[0].modesel == FILT_TILT)
           tiltbias = constrain(tiltbias + direction, LVL_MIN_DB, LVL_MAX_DB);
         else
           res = constrain(res + direction, 70, 500);
@@ -193,7 +215,7 @@ private:
   CVInputMap pitch_cv;
   int16_t res = 75;
   CVInputMap res_cv;
-  int16_t fold = 6; // 0% is mute, 6% is dry
+  int16_t fold = 6; // 0% is mute, 6% is dry, max 400% but could go higher
   CVInputMap fold_cv;
   int8_t amplevel = 0;
   CVInputMap amp_cv;
@@ -201,28 +223,33 @@ private:
 
   struct FilterFolder {
     AudioEffectWaveFolder folder;
-    AudioFilterStateVariable filter;
+    AudioFilterStateVariable2 filter;
     AudioSynthWaveformDc drive;
     AudioMixer4 mixer;
 
-    uint8_t modesel = 0; // 0 = BYPASS, 1 = LPF, 2 = BPF, 3 = HPF, 4 = Tilt
-
-    AudioConnection conn0{folder, 0, filter, 0};
-    AudioConnection conn2{folder, 0, mixer, 0};
-    AudioConnection conn1{filter, 0, mixer, 1};
-    AudioConnection conn1a{filter, 1, mixer, 2};
-    AudioConnection conn1b{filter, 2, mixer, 3};
-
-    AudioConnection conn4{drive, 0, folder, 1};
+    FiltMode modesel = FILT_BYPASS;
 
     void AmpAndFold(float foldF, float level, int tilt = 0) {
       drive.amplitude(foldF);
-      for (int i = 0; i < 4; ++i) {
-        float chanlvl = (i == modesel || (modesel > 3 && (i==1 || i==3))) * level;
-        if (i==1) chanlvl *= dbToScalar(tilt) / 2;
-        if (i==3) chanlvl *= -dbToScalar(-tilt) / 2;
+      for (uint8_t i = 0; i < 4; ++i) {
+        bool chan_active = ( i == modesel
+            || (modesel == FILT_TILT && (i==1 || i==3))
+            || (modesel == FILT_DJ && (tilt>0 ? i==3 : i==1))
+        );
+        float chanlvl = chan_active * level;
+        if (i==1) chanlvl *= dbToScalar(tilt);
+        if (i==3) chanlvl *= -dbToScalar(-tilt);
         mixer.gain(i, chanlvl);
       }
+    }
+
+    void Start(HemisphereAudioApplet* owner) {
+      owner->PatchCable(folder, 0, filter, 0);
+      owner->PatchCable(folder, 0, mixer, 0);
+      owner->PatchCable(filter, 0, mixer, 1);
+      owner->PatchCable(filter, 1, mixer, 2);
+      owner->PatchCable(filter, 2, mixer, 3);
+      owner->PatchCable(drive, 0, folder, 1);
     }
   };
 
@@ -230,13 +257,10 @@ private:
   std::array<FilterFolder, Channels> filtfolder;
   AudioPassthrough<Channels> output;
 
-  std::array<AudioConnection, Channels> in_conns;
-  std::array<AudioConnection, Channels> out_conns;
-
   void ChangeMode(int dir) {
-    uint8_t newmode = constrain(filtfolder[0].modesel + dir, 0, 4);
+    uint8_t newmode = constrain(filtfolder[0].modesel + dir, 0, FILT_MODE_COUNT - 1);
     for (int i = 0; i < Channels; i++) {
-      filtfolder[i].modesel = newmode;
+      filtfolder[i].modesel = FiltMode(newmode);
     }
   }
 };

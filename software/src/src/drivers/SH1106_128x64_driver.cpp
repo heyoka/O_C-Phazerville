@@ -205,7 +205,7 @@ void SH1106_128x64_Driver::Flush() {
 #elif defined(__IMXRT1062__)
   // The same scenario as above can occur with the ISR-driven transfer
   if (sendpage_state) { 
-    SERIAL_PRINTLN("display wait / frame drop");
+    //SERIAL_PRINTLN("display wait / frame drop");
   }
 #endif
 }
@@ -395,7 +395,7 @@ void SH1106_128x64_Driver::SPI_send(void *bufr, size_t n) {
   #if defined(ARDUINO_TEENSY41)
     if (OLED_Uses_SPI1) {
       SPI1.beginTransaction(
-        SPISettings(NorthernLightModular? 8000000 : 24000000, MSBFIRST, SPI_MODE0)
+        SPISettings(Large_OLED? 8000000 : 24000000, MSBFIRST, SPI_MODE0)
       );
       SPI1.transfer(bufr, NULL, n);
       SPI1.endTransaction();

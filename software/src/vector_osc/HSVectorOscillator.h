@@ -21,7 +21,7 @@
 #ifndef HS_VECTOR_OSCILLATOR
 #define HS_VECTOR_OSCILLATOR
 
-#include "util/util_math.h"
+#include "../util/util_math.h"
 
 namespace HS {
 
@@ -91,7 +91,7 @@ public:
 
     /* Update an existing segment */
     void SetSegment(uint8_t ix, HS::VOSegment segment) {
-        ix = constrain(ix, 0, segment_count - 1);
+        CONSTRAIN(ix, 0, segment_count - 1);
         change_total_time(-segments[ix].time); // subtract
         memcpy(&segments[ix], &segment, sizeof(segments[ix]));
         change_total_time(segments[ix].time); // add
@@ -99,7 +99,7 @@ public:
     }
 
     HS::VOSegment GetSegment(uint8_t ix) {
-        ix = constrain(ix, 0, segment_count - 1);
+        CONSTRAIN(ix, 0, segment_count - 1);
         return segments[ix];
     }
 
@@ -125,11 +125,11 @@ public:
         eoc = 0;
     }
 
-    void Reset() {
+    void Reset(uint32_t newphase = 0) {
         segment_index = 0;
         segment_time = 0;
         segment_start_level = (segments[segment_count - 1].level - 128) * 256;
-        phase = 0;
+        phase = newphase;
         sustained = 0;
         eoc = !cycle;
     }
@@ -174,8 +174,11 @@ public:
         return rescale(InterpLinear16(start * 256, end * 256, segment_phase >> 16));
     }
 
+    const uint32_t GetPhase() const {
+      return phase;
+    }
 private:
-    VOSegment segments[12]; // Array of segments in this Oscillator
+    VOSegment segments[HS::VO_MAX_SEGMENTS]; // Array of segments in this Oscillator
     uint8_t segment_count = 0; // Number of segments
     int total_time = 0; // Sum of time values for all segments
     bool eoc = 1; // The most recent tick's next() read was the end of a cycle

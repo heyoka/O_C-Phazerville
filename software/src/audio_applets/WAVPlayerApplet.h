@@ -1,5 +1,7 @@
 /*
  * WAV file player applet
+ *    by djphazer
+ *    based on TeensyVariablePlayback library by Nic Newdigate
  *
  * It looks in the root directory of the SD card for the
  * selected file, by number, in the format:
@@ -8,14 +10,14 @@
  *   002.WAV
  *   ...
  *
+ * All sampling rates should work, but they must be 16-bit.
+ *
  * Sync mode will automatically lock tempo with the internal clock.
+ *
+ * Use AuxButton (X or Y) for Play/Stop.
  *
  */
 
-#include "Audio/AudioPassthrough.h"
-#include "CVInputMap.h"
-#include "HemisphereAudioApplet.h"
-#include "OC_gpio.h"
 #include <TeensyVariablePlayback.h>
 
 template <AudioChannels Channels>
@@ -30,10 +32,19 @@ public:
 
   void Start() {
     for (int i = 0; i < Channels; i++) {
-      in_conns[i].connect(input, i, mixer[i], 3);
+      PatchCable(input, i, mixer[i], 3);
       mixer[i].gain(3, 1.0);
-      out_conns[i].connect(mixer[i], 0, output, i);
+      PatchCable(mixer[i], 0, output, i);
     }
+
+    PatchCable(wavplayer, 0, hpfilter[0], 0);
+    PatchCable(wavplayer, 1, hpfilter[1], 0);
+    PatchCable(wavplayer, 0, mixer[0], 0);
+    PatchCable(wavplayer, 1, mixer[1], 0);
+    PatchCable(hpfilter[0], 2, mixer[0], 1);
+    PatchCable(hpfilter[1], 2, mixer[1], 1);
+    PatchCable(hpfilter[0], 0, mixer[0], 2);
+    PatchCable(hpfilter[1], 0, mixer[1], 2);
 
     hpfilter[0].resonance(1.0);
     hpfilter[1].resonance(1.0);
@@ -50,6 +61,11 @@ public:
   }
   void Unload() {
     wavplayer.stop();
+    AllowRestart();
+  }
+
+  void Reset() override {
+    playstop_cv.Reset();
   }
 
   void Controller() {
@@ -64,6 +80,10 @@ public:
       FileMatchTempo();
     else
       FileRate(0.01f * playrate + playrate_cv.InF(0.0f));
+
+    start_beat_mod = constrain(start_beat + start_beat_cv.SemitoneIn(), 0, 999);
+    if (wavplayer_ready)
+      wavplayer.setBeatStart(start_beat_mod);
 
     if (HS::clock_m.EndOfBeat() && FileIsPlaying()) {
       if (loop_length && loop_on) {
@@ -130,12 +150,12 @@ public:
     size_t y = 13;
     gfxStartCursor(1, y);
     gfxPrintfn(1, y, 0, "%03u", GetFileNum());
-    gfxEndCursor(cursor == FILE_NUM);
+    gfxEndCursor(cursor == FILE_NUM, "FileSel");
 
     gfxIcon(22, y, FileIsPlaying() ? PLAY_ICON : STOP_ICON);
     gfxStartCursor(30, y-1);
     gfxPrint(playstop_cv);
-    gfxEndCursor(cursor == PLAYSTOP_GATE_CV, false, playstop_cv.InputName());
+    gfxEndCursor(cursor == PLAYSTOP_GATE_CV, false, playstop_cv.InputName(), "PlayTrig");
 
     if (wavplayer_ready)
       gfxPrint(37, y, GetFileBPM());
@@ -145,7 +165,7 @@ public:
     // filter mod
     gfxStartCursor(56, y);
     gfxPrint(djfilter_cv);
-    gfxEndCursor(cursor == FILTER_CV, false, djfilter_cv.InputName());
+    gfxEndCursor(cursor == FILTER_CV, false, djfilter_cv.InputName(), "FilterCV");
 
     // filter meter at the top
     if (filter_on) {
@@ -155,16 +175,7 @@ public:
     }
 
     y += 10;
-    if (cursor == FILTER_PARAM) {
-      if (EditMode()) {
-        if (djfilter > 0) gfxPrint(36, y, "HPF");
-        else if (djfilter < 0) gfxPrint(36, y, "LPF");
-        else gfxPrint(40, y, "X");
-      } else {
-        gfxIcon(49, y, RIGHT_ICON);
-        gfxIcon(56, y, (filter_on) ? SLEW_ICON : PhzIcons::tuner);
-      }
-    } else if (FileIsPlaying()) {
+    if (FileIsPlaying()) {
       uint32_t tmilli = GetFileTime();
       uint32_t tsec = tmilli / 1000;
       uint32_t tmin = tsec / 60;
@@ -174,17 +185,30 @@ public:
       gfxPos(1, y);
       graphics.printf("%02lu:%02lu.%03lu", tmin, tsec, tmilli);
     }
+    if (cursor == FILTER_PARAM) {
+      if (EditMode()) {
+        SetLabel("Filter");
+        const int x = 45;
+        gfxClear(x, y, 18, 10);
+        if (djfilter > 0) gfxPrint(x, y, "HPF");
+        else if (djfilter < 0) gfxPrint(x, y, "LPF");
+        else gfxPrint(x+6, y, "X");
+      } else {
+        gfxIcon(49, y, RIGHT_ICON, true);
+        gfxIcon(56, y, (filter_on) ? SLEW_ICON : PhzIcons::tuner, true);
+      }
+    }
 
     y += 10;
-    gfxPrint(1, y, "Lvl:");
-    gfxStartCursor();
+    gfxStartCursor(1, y);
     graphics.printf("%3ddB", level);
-    gfxEndCursor(cursor == LEVEL);
+    gfxEndCursor(cursor == LEVEL, "Gain");
     gfxStartCursor();
     gfxPrint(level_cv);
-    gfxEndCursor(cursor == LEVEL_CV, false, level_cv.InputName());
+    gfxEndCursor(cursor == LEVEL_CV, false, level_cv.InputName(), "Gain CV");
 
     y += 10;
+
     if (tempo_sync) {
       gfxPrint(1, y, "Sync:");
     } else {
@@ -195,17 +219,29 @@ public:
     gfxEndCursor(cursor == PLAYRATE, true);
     gfxStartCursor();
     gfxPrint(playrate_cv);
-    gfxEndCursor(cursor == PLAYRATE_CV, false, playrate_cv.InputName());
+    gfxEndCursor(cursor == PLAYRATE_CV, false, playrate_cv.InputName(), "Rate CV");
 
     y += 10;
-    gfxPrint(1, y, "Loop:");
-    gfxStartCursor();
-    graphics.printf("%2u", loop_length);
-    gfxEndCursor(cursor == LOOP_LENGTH);
+    if (cursor <= START_BEAT_CV) {
+      gfxIcon(1, y, PULSES_ICON);
+      gfxStartCursor(11, y);
+      graphics.printf("%3u", ((cursor==START_BEAT && EditMode())?start_beat:start_beat_mod) + 1);
+      gfxEndCursor(cursor == START_BEAT, "StartBeat");
+      if (start_beat_mod != start_beat) gfxIcon(30, y, CV_ICON);
 
-    gfxIcon(52, y, loop_on ? CHECK_ON_ICON : CHECK_OFF_ICON);
-    if (cursor == LOOP_ENABLE)
-      gfxFrame(51, y-1, 10, 10);
+      gfxStartCursor(40, y);
+      gfxPrint(start_beat_cv);
+      gfxEndCursor(cursor == START_BEAT_CV, false, start_beat_cv.InputName(), "Start CV");
+    } else {
+      gfxIcon(1, y, LOOP_ICON);
+      gfxStartCursor(10, y);
+      graphics.printf("%2u", loop_length);
+      gfxEndCursor(cursor == LOOP_LENGTH, "LoopBeats");
+
+      gfxIcon(50, y, loop_on ? CHECK_ON_ICON : CHECK_OFF_ICON);
+      if (cursor == LOOP_ENABLE)
+        gfxIcon(42, y, RIGHT_ICON, true);
+    }
 
     gfxDisplayInputMapEditor();
   }
@@ -224,7 +260,8 @@ public:
           IndexedInput(PLAYSTOP_GATE_CV, playstop_cv),
           IndexedInput(FILTER_CV, djfilter_cv),
           IndexedInput(LEVEL_CV, level_cv),
-          IndexedInput(PLAYRATE_CV, playrate_cv)
+          IndexedInput(PLAYRATE_CV, playrate_cv),
+          IndexedInput(START_BEAT_CV, start_beat_cv)
     )) return;
 
     if (LOOP_ENABLE == cursor) {
@@ -265,6 +302,12 @@ public:
       case PLAYRATE_CV:
         playrate_cv.ChangeSource(direction);
         break;
+      case START_BEAT:
+        start_beat = constrain(start_beat + direction, 0, 999);
+        break;
+      case START_BEAT_CV:
+        start_beat_cv.ChangeSource(direction);
+        break;
       case LOOP_LENGTH:
         loop_length = constrain(loop_length + direction, 0, 128);
         break;
@@ -274,16 +317,21 @@ public:
   void OnDataRequest(std::array<uint64_t, CONFIG_SIZE>& data) override {
     // STOP playback to avoid SD card hangup on preset save
     wavplayer.stop();
-    data[0] = PackPackables(level, level_cv, int8_t(playrate), playrate_cv, wavplayer_select, djfilter);
+    uint8_t filenum = (uint8_t)wavplayer_select;
+    data[0] = PackPackables(level, level_cv, uint8_t(tempo_sync), playrate_cv, filenum, djfilter);
     data[1] = PackPackables(playrate, djfilter_cv, playstop_cv, loop_length);
+    data[2] = PackPackables(start_beat, start_beat_cv);
   }
   void OnDataReceive(const std::array<uint64_t, CONFIG_SIZE>& data) override {
     int8_t old_playrate;
-    UnpackPackables(data[0], level, level_cv, old_playrate, playrate_cv, wavplayer_select, djfilter);
+    uint8_t filenum;
+    UnpackPackables(data[0], level, level_cv, old_playrate, playrate_cv, filenum, djfilter);
     UnpackPackables(data[1], playrate, djfilter_cv, playstop_cv, loop_length);
+    UnpackPackables(data[2], start_beat, start_beat_cv);
     if (playrate == 0) playrate = old_playrate;
+    if (old_playrate) tempo_sync = true;
     if (loop_length == 0) loop_length = 8;
-    ChangeToFile(wavplayer_select);
+    ChangeToFile(filenum);
   }
 
   AudioStream* InputStream() override {
@@ -306,6 +354,8 @@ private:
     LEVEL_CV,
     PLAYRATE,
     PLAYRATE_CV,
+    START_BEAT,
+    START_BEAT_CV,
     LOOP_LENGTH,
     LOOP_ENABLE,
 
@@ -335,36 +385,29 @@ private:
 
   AudioPassthrough<Channels> input;
   AudioPlaySdResmp      wavplayer;
-  AudioFilterStateVariable hpfilter[2];
+  AudioFilterStateVariable2 hpfilter[2];
   AudioMixer4           mixer[2];
   AudioPassthrough<Channels> output;
-
-  std::array<AudioConnection, Channels> in_conns;
-  std::array<AudioConnection, Channels> out_conns;
-
-  AudioConnection          patchCordWav1L{wavplayer, 0, hpfilter[0], 0};
-  AudioConnection          patchCordWav1R{wavplayer, 1, hpfilter[1], 0};
-  AudioConnection          patchCordWav1Ldry{wavplayer, 0, mixer[0], 0};
-  AudioConnection          patchCordWav1Rdry{wavplayer, 1, mixer[1], 0};
-  AudioConnection          patchCordWavHPF1L{hpfilter[0], 2, mixer[0], 1};
-  AudioConnection          patchCordWavHPF1R{hpfilter[1], 2, mixer[1], 1};
-  AudioConnection          patchCordWavLPF2L{hpfilter[0], 0, mixer[0], 2};
-  AudioConnection          patchCordWavLPF2R{hpfilter[1], 0, mixer[1], 2};
 
   // SD player vars, copied from other dev branch
   bool wavplayer_reload = true;
   bool wavplayer_playtrig = false;
   bool wavplayer_ready = false;
-  uint8_t wavplayer_select = 1;
+  uint16_t wavplayer_select = 1;
+  uint16_t start_beat = 0;
+  uint16_t start_beat_mod = 0;
   uint8_t loop_length = 8;
   int8_t loop_count = 0;
   bool loop_on = false;
   bool syncloopstart = false;
 
+  CVInputMap start_beat_cv;
+
   // SD file player functions
   void FileLoad() {
     char filename[] = "000.WAV";
-    filename[1] += wavplayer_select / 10;
+    filename[0] += wavplayer_select / 100;
+    filename[1] += wavplayer_select / 10 % 10;
     filename[2] += wavplayer_select % 10;
     wavplayer_ready = wavplayer.playWav(filename);
   }
@@ -378,7 +421,7 @@ private:
   void ToggleFilePlayer() {
     if (wavplayer.isPlaying()) {
       wavplayer.stop();
-      wavplayer.setPlayStart(play_start_sample);
+      //wavplayer.setPlayStart(play_start_sample);
       loop_on = false;
     } else if (SDcard_Ready) {
       StartPlaying();
@@ -395,7 +438,7 @@ private:
       loop_on = true;
       loop_count = 0;
     } else {
-      wavplayer.setPlayStart(play_start_sample);
+      //wavplayer.setPlayStart(play_start_sample);
       loop_on = false;
     }
   }
@@ -423,7 +466,7 @@ private:
   }
 
   void ChangeToFile(int select) {
-    wavplayer_select = (uint8_t)constrain(select, 0, 99);
+    wavplayer_select = (uint16_t)constrain(select, 0, 999);
     wavplayer_reload = true;
     if (wavplayer.isPlaying()) {
       StartPlaying();

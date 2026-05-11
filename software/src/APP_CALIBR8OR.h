@@ -218,8 +218,6 @@ public:
 
 
     void Start() {
-        segment.Init(SegmentSize::BIG_SEGMENTS);
-
         // make sure to turn this off, just in case
         FreqMeasure.end();
         OC::DigitalInputs::reInit();
@@ -312,7 +310,6 @@ public:
         }
 
 #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
-        thisUSB.Task();
         while (usbHostMIDI.read()) {
             const uint8_t message = usbHostMIDI.getType();
             const uint8_t data1 = usbHostMIDI.getData1();
@@ -560,12 +557,6 @@ public:
 
         auto &q = q_engine[sel_chan];
         preset_modified = 1;
-        if (HS::q_edit) {
-            // Scale Select
-            HS::NudgeScale(sel_chan, direction);
-            q.quantizer.Requantize();
-            return;
-        }
 
         if (!edit_mode) { // Octave jump
           q.octave += direction;
@@ -590,12 +581,6 @@ public:
         }
 
         preset_modified = 1;
-        if (HS::q_edit) {
-            // Root Note
-            HS::SetRootNote(sel_chan, HS::GetRootNote(sel_chan) + direction);
-            q_engine[sel_chan].quantizer.Requantize();
-            return;
-        }
 
         if (!edit_mode) {
             SetTranspose(sel_chan, channel[sel_chan].transpose + direction);
@@ -631,7 +616,7 @@ public:
 
     int trigger_flash[DAC_CHANNEL_LAST];
 
-    SegmentDisplay segment;
+    SegmentDisplay segment{SegmentSize::BIG_SEGMENTS};
     Cal8ChannelConfig channel[DAC_CHANNEL_LAST];
 
     void DrawPresetSelector() {
@@ -881,7 +866,8 @@ void Calibr8or_handleButtonEvent(const UI::Event &event) {
           else if (event.control == OC::CONTROL_BUTTON_DOWN)
             HS::NudgeOctave(HS::qview, -1);
           else {
-            HS::q_edit = false;
+            HS::q_edit = 0;
+            HS::popup_tick = 0;
           }
 
           OC::ui.SetButtonIgnoreMask();

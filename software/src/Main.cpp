@@ -49,12 +49,40 @@
 
 USBHost thisUSB;
 USBHub hub1(thisUSB);
-MIDIDevice usbHostMIDI(thisUSB);
+MIDIDevice_BigBuffer usbHostMIDI(thisUSB);
 
 #if defined(ARDUINO_TEENSY41)
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial8, MIDI1);
 #include "AudioIO.h"
-#endif
+#include "usb_desc.h"
+#include "Wire.h"
+
+void ScanI2C() {
+  noInterrupts();
+
+  Serial.println("...Scanning i2c addresses...");
+  uint8_t error;
+  for (uint8_t address = 1; address < 127; address++) {
+    // The i2c_scanner uses the return value of
+    // the Write.endTransmisstion to see if
+    // a device did acknowledge to the address.
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.print("I2C device found at address 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+    } else if (error == 4) {
+      Serial.print("Unknown error at address 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+    } //else { Serial.print("Nothing happened at address 0x"); }
+  }
+
+  interrupts();
+}
+#endif // ARDUINO_TEENSY41
 
 #endif // __IMXRT1062__
 
@@ -157,6 +185,10 @@ void setup() {
   OC::calibration_load();
   OC::SetFlipMode(OC::calibration_data.flipcontrols());
 
+#if defined(ARDUINO_TEENSY41)
+  Wire.begin();
+  Wire.setClock(100000);
+#endif
   OC::DigitalInputs::Init();
 
   OC::ADC::Init(&OC::calibration_data.adc, OC::calibration_data.flipcontrols());
@@ -207,7 +239,7 @@ void setup() {
   #endif
 
   // initialize LittleFS for config files
-  PhzConfig::setup();
+  PhzConfig::Init();
 
   // USB Host support for both 4.0 and 4.1
   usbHostMIDI.begin();
@@ -234,6 +266,8 @@ void setup() {
 
   if (start_cal)
     OC::start_calibration();
+
+  SERIAL_PRINTLN("[End of setup()]");
 }
 
 /*  ---------    main loop  --------  */
@@ -245,6 +279,9 @@ void FASTRUN loop() {
   OC::CORE::app_loop_enabled = true;
   uint32_t menu_redraws = 0;
   while (true) {
+#ifdef __IMXRT1062__
+    thisUSB.Task();
+#endif
 
     // Refresh display
     if (MENU_REDRAW && OC::CORE::display_update_enabled) {
@@ -279,6 +316,9 @@ void FASTRUN loop() {
     if (OC::CORE::app_loop_enabled)
       OC::apps::current_app->loop();
 
+    // Take care of queued tasks
+    OC::CORE::FlushTasks();
+
     // UI events
     if (OC::UI_MODE_APP_SETTINGS == ui_mode) {
       if (!OC::ui.AppSettings(false)) {
@@ -304,6 +344,11 @@ void FASTRUN loop() {
     if (millis() - LAST_REDRAW_TIME > REDRAW_TIMEOUT_MS)
       MENU_REDRAW = 1;
 
+#ifdef MTP_INTERFACE
+    // handle MTP Disk requests
+    MTP.loop();
+#endif
+
     static size_t cap_idx = 0;
     static elapsedMicros cap_send_time = 0;
     // check for request from PC to capture the screen
@@ -320,6 +365,9 @@ void FASTRUN loop() {
             Serial.printf("'D' = Toggle Display Redraw [%s]\n", OC::CORE::display_update_enabled ? "ON" : "OFF");
             Serial.printf("'L' = Toggle App Loop [%s]\n", OC::CORE::app_loop_enabled ? "ON" : "OFF");
 #if defined(__IMXRT1062__)
+#if defined(ARDUINO_TEENSY41)
+            Serial.println("'i' = scan all i2c addresses");
+#endif
             Serial.println("'l' = list all files in flash (LittleFS)");
             Serial.println("'s' = list all files on SD card");
             Serial.println("'C' = clear/reset default Config file");
@@ -341,6 +389,11 @@ void FASTRUN loop() {
             break;
 
 #if defined(__IMXRT1062__)
+#if defined(ARDUINO_TEENSY41)
+          case 'i':
+            ScanI2C();
+            break;
+#endif
           case 'C':
             Serial.println("Resetting Config File!!");
             PhzConfig::clear_config();

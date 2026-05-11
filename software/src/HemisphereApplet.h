@@ -59,6 +59,8 @@ struct Applet {
 
 struct EncoderEditor {
   bool isEditing;
+  bool aux_action = false;
+  const char* label;
 };
 
 static constexpr bool ALWAYS_SHOW_ICONS = false;
@@ -68,15 +70,15 @@ using namespace HS;
 
 class HemisphereApplet {
 public:
-    static int cursor_countdown[APPLET_SLOTS + 1];
+    static int cursor_countdown[APPLET_CURSOR_COUNT];
     static int16_t cursor_start_x;
     static int16_t cursor_start_y;
     static const char* help[HELP_LABEL_COUNT];
-    static EncoderEditor enc_edit[APPLET_SLOTS + 1];
+    static EncoderEditor enc_edit[APPLET_CURSOR_COUNT];
 
     static void ProcessCursors() {
       // Cursor countdowns. See CursorBlink(), ResetCursor(), gfxCursor()
-      for (int i = 0; i < APPLET_SLOTS + 1; ++i) {
+      for (int i = 0; i < APPLET_CURSOR_COUNT; ++i) {
         if (--cursor_countdown[i] < -HEMISPHERE_CURSOR_TICKS)
           cursor_countdown[i] = HEMISPHERE_CURSOR_TICKS;
       }
@@ -100,6 +102,7 @@ public:
     virtual void DrawFullScreen() { View(); }
     virtual void AuxButton() { CancelEdit(); }
 
+
     void BaseView(bool full_screen = false, bool parked = true);
     void BaseStart(const HEM_SIDE hemisphere_);
 
@@ -116,7 +119,10 @@ public:
     }
     void CancelEdit() {
       enc_edit[hemisphere].isEditing = false;
+      ClearEditInputMap();
     }
+    void SetLabel(const char *str) { enc_edit[hemisphere].label = str; }
+    void SetAux(bool aux) { enc_edit[hemisphere].aux_action = aux; }
 
     template<typename T>
     void MoveCursor(T &cursor, int direction, int max) {
@@ -131,8 +137,8 @@ public:
     }
 
     // Buffered I/O functions
-    int ViewIn(int ch) {return frame.inputs[io_offset + ch];}
-    int ViewOut(int ch) {return frame.outputs[io_offset + ch];}
+    int ViewIn(int ch) const {return frame.inputs[io_offset + ch];}
+    int ViewOut(int ch) const {return frame.ViewOut(io_offset + ch);}
     uint32_t ClockCycleTicks(int ch) {
       if (clock_m.IsRunning() && clock_m.GetMultiply(io_offset + ch) != 0)
           return clock_m.GetCycleTicks(io_offset + ch);
@@ -145,11 +151,9 @@ public:
       return cvmap[ch + io_offset].In();
     }
 
-#ifdef __IMXRT1062__
-    float InF(int ch) {
-        return static_cast<float>(In(ch)) / HEMISPHERE_MAX_INPUT_CV;
+    float InF(int ch, int max = HEMISPHERE_MAX_INPUT_CV) {
+        return static_cast<float>(In(ch)) / max;
     }
-#endif
 
     // Apply small center detent to input, so it reads zero before a threshold
     int DetentedIn(int ch) {
@@ -177,22 +181,24 @@ public:
     }
 
     // --- CV Output methods
-    void Out(int ch, int value, int octave = 0) {
-        frame.Out( (DAC_CHANNEL)(ch + io_offset), value + (octave * (12 << 7)));
+    void Out(int ch, int value) {
+        frame.Out( (DAC_CHANNEL)(ch + io_offset), value);
     }
 
-    void SmoothedOut(int ch, int value, int kSmoothing) {
+    // TODO: rework or delete
+    [[deprecated("SmoothedOut() was a bad idea")]]
+    void SmoothedOut(int ch, int value, int kSmoothing) const {
       if (OC::CORE::ticks % kSmoothing == 0) {
         DAC_CHANNEL channel = (DAC_CHANNEL)(ch + io_offset);
-        value = (frame.outputs_smooth[channel] * (kSmoothing - 1) + value) / kSmoothing;
-        frame.outputs[channel] = frame.outputs_smooth[channel] = value;
+        value = (frame.outputs[channel].get_target() * (kSmoothing - 1) + value) / kSmoothing;
+        frame.outputs[channel].set(value);
       }
     }
     void ClockOut(const int ch, const int ticks = HEMISPHERE_CLOCK_TICKS * trig_length) {
         frame.ClockOut( (DAC_CHANNEL)(io_offset + ch), ticks);
     }
     void GateOut(int ch, bool high) {
-        Out(ch, 0, (high ? PULSE_VOLTAGE : 0));
+        Out(ch, (high ? PULSE_VOLTAGE : 0)*(ONE_OCTAVE));
     }
 
     // Quantizer helpers
@@ -247,24 +253,68 @@ public:
 
     //////////////// Offset graphics methods
     ////////////////////////////////////////////////////////////////////////////////
-    void gfxCursor(int x, int y, int w, int h = 9) { // assumes standard text height for highlighting
+    void gfxCursor(int x, int y, int w, const char *str, const char *extra_str = nullptr) {
+      gfxCursor(x, y, w, 9, str, extra_str);
+    }
+    void gfxCursor(int x, int y, int w, int h = 9, const char *str = nullptr, const char *extra_str = nullptr) {
+      SetLabel(str);
+      SetAux(false);
+      // assumes standard text height for highlighting
       if (EditMode()) {
         gfxInvert(x, y - h, w, h);
+        if (extra_str) {
+          const int box_w = strlen(extra_str)*6 + 4;
+          const int box_x = min(x, 63 - box_w);
+          const int box_y = (y > (63 - h - 2)) ? y - 2*h - 2 : y;
+
+          gfxClear(box_x, box_y, box_w, h+3);
+          gfxFrame(box_x+1, box_y, box_w, h+2);
+          gfxPrint(box_x+2, box_y+2, extra_str);
+        }
       } else if (CursorBlink()) {
         gfxLine(x, y, x + w - 1, y);
         gfxPixel(x, y-1);
         gfxPixel(x + w - 1, y-1);
       }
     }
-    void gfxSpicyCursor(int x, int y, int w, int h = 9) {
+    void gfxSpicyCursor(int x, int y, int w, const char *str) {
+      gfxSpicyCursor(x, y, w, 9, str);
+    }
+    void gfxSpicyCursor(int x, int y, int w, int h = 9, const char *str = nullptr, const char *extra_str = nullptr) {
+      SetLabel(str);
+      SetAux(true);
       if (EditMode()) {
         if (CursorBlink())
           gfxFrame(x, y - h, w, h, true);
         gfxInvert(x, y - h, w, h);
+        if (extra_str) {
+          const int box_w = strlen(extra_str)*6 + 4;
+          const int box_x = min(x, 63 - box_w);
+          const int box_y = (y > (63 - h - 2)) ? y - 2*h - 2 : y;
+
+          gfxClear(box_x, box_y, box_w, h+3);
+          gfxFrame(box_x+1, box_y, box_w, h+2);
+          gfxPrint(box_x+2, box_y+2, extra_str);
+        }
       } else {
         gfxLine(x - CursorBlink(), y, x + w - 1, y, 2);
         gfxPixel(x, y-1);
         gfxPixel(x + w - 1, y-1);
+      }
+    }
+
+    void gfxParamHeader() {
+      gfxIcon( 4, 6, DOWN_BTN_ICON);
+      gfxIcon(20, 6, DOWN_BTN_ICON);
+      gfxIcon(36, 6, DOWN_BTN_ICON);
+      gfxIcon(52, 6, DOWN_BTN_ICON);
+      const char* const str = enc_edit[hemisphere].label;
+      if (str) {
+        const int x = (1-(hemisphere&1))?55-strlen(str)*6 : 8;
+        gfxPrint(x, 1, str);
+      }
+      if (enc_edit[hemisphere].aux_action) {
+        gfxIcon(55*(hemisphere&1), 1, ZAP_ICON);
       }
     }
 
@@ -326,6 +376,22 @@ public:
       const int height = map.InRescaled(24);
       gfxLine(xpos, ypos, xpos, ypos - height);
     }
+    void gfxPrint(int x, int y, HS::QuantEngine &q_eng, bool overlay = true) {
+      if (overlay) {
+        gfxClear(x - 2, y - 2, 29, 22);
+        gfxFrame(x - 1, y - 2, 27, 21, true);
+      }
+
+      gfxPrint(x, y, OC::scale_names_short[q_eng.scale]);
+      gfxPrint(
+        (q_eng.octave == 0 ? x + 6 : x),
+        y + 10,
+        OC::Strings::note_names_unpadded[q_eng.root_note]
+      );
+      if (q_eng.octave != 0) {
+        gfxPrint(x + 12, y + 10, q_eng.octave);
+      }
+    }
 
     void gfxStartCursor(int x, int y) {
         gfxPos(x, y);
@@ -337,24 +403,28 @@ public:
         cursor_start_y = gfxGetPrintPosY();
     }
 
-    void gfxEndCursor(bool selected, bool spicy = false, const char *str = nullptr) {
-        if (selected) {
-          if (str) {
-            gfxClear(cursor_start_x - 14, cursor_start_y-1, 24, 10);
-            gfxFrame(cursor_start_x - 13, cursor_start_y-1, 22, 10, spicy);
-            gfxPrint(cursor_start_x - 11, cursor_start_y+1, str);
-            if (EditMode())
-              gfxInvert(cursor_start_x - 14, cursor_start_y-1, 24, 10);
-          } else {
-            int16_t w = gfxGetPrintPosX() - cursor_start_x;
-            int16_t y = gfxGetPrintPosY() + 8;
-            int h = y - cursor_start_y;
-            if (spicy)
-              gfxSpicyCursor(cursor_start_x, y, w, h);
-            else
-              gfxCursor(cursor_start_x, y, w, h);
-          }
-        }
+    void gfxEndCursor(bool selected, const char *extra_str) {
+      gfxEndCursor(selected, false, nullptr, extra_str);
+    }
+    void gfxEndCursor(bool selected, bool spicy = false, const char *str = nullptr, const char *extra_str = nullptr) {
+      if (!selected) return;
+
+      SetLabel(extra_str);
+      SetAux(spicy);
+      if (str) {
+        const int w = strlen(str) * 6 + 2;
+        const int x = constrain(gfxGetPrintPosX() - w, 0, 63 - w);
+        gfxClear(x - 2, cursor_start_y - 1, w + 3, 12);
+        gfxFrame(x - 1, cursor_start_y - 1, w + 1, 11, spicy);
+        gfxPrint(x, cursor_start_y + 1, str);
+        if (EditMode()) gfxInvert(x - 1, cursor_start_y - 1, w + 1, 11);
+      } else {
+        int16_t w = gfxGetPrintPosX() - cursor_start_x;
+        int16_t y = gfxGetPrintPosY() + 8;
+        int h = y - cursor_start_y;
+        if (spicy) gfxSpicyCursor(cursor_start_x, y, w, h, extra_str);
+        else gfxCursor(cursor_start_x, y, w, h, extra_str);
+      }
     }
 
     void gfxPrint(int x_adv, int num) { // Print number with character padding
@@ -419,7 +489,8 @@ public:
         if (CursorBlink()) gfxBitmap(x, y, w, data);
     }
 
-    void gfxIcon(int x, int y, const uint8_t *data) {
+    void gfxIcon(int x, int y, const uint8_t *data, bool clearfirst = false) {
+        if (clearfirst) gfxClear(x, y, 8, 8);
         gfxBitmap(x, y, 8, data);
     }
 
@@ -449,6 +520,12 @@ public:
 
     void gfxHeader(const char *str, const uint8_t *icon = nullptr, int y = 2,
         bool underline = true) {
+      if (IsEditingInputMap()) return;
+      if (EditMode()) {
+        gfxParamHeader();
+        return;
+      }
+
       int x = 1;
       if (icon) {
         gfxIcon(x, y, icon);
@@ -504,9 +581,7 @@ public:
             break;
           }
           case DIGITAL_INPUT_MAP: {
-            int8_t& div
-              = std::get<DigitalInputMap*>(selected_input_map)->division;
-            div = constrain(div + direction, -64, 64);
+            std::get<DigitalInputMap*>(selected_input_map)->div_mult.Adjust(direction);
             break;
           }
           default:
@@ -522,16 +597,19 @@ public:
         gfxClear(0, 0, 63, 11);
         switch (selected_input_map.index()) {
           case CV_INPUT_MAP: {
-            gfxPos(32 - 7 * 6 / 2, 2);
-            int tenths = std::get<CVInputMap*>(selected_input_map)->Atten();
-            graphics.printf("%4d.%d%%", tenths / 10, abs(tenths) % 10);
+            int tenths = Atten(std::get<CVInputMap*>(selected_input_map)->attenuversion);
+            gfxPos(32 - 7 * 6 / 2 + pad(10000, tenths) - 6*(abs(tenths)<10), 2);
+            if (tenths < 0) gfxPrint("-");
+            graphics.printf("%d.%d%%", abs(tenths) / 10, abs(tenths) % 10);
             break;
           }
           case DIGITAL_INPUT_MAP: {
             gfxPos(32 - 4 * 6 / 2, 2);
-            int8_t div = std::get<DigitalInputMap*>(selected_input_map)->division;
-            if (div < 0) graphics.printf("/%3d", -div + 1);
-            else graphics.printf("X%3d", div + 1);
+            DigitalInputMap* map = std::get<DigitalInputMap*>(selected_input_map);
+            int8_t div = map->div_mult.steps;
+            if (map->source < 0) graphics.print(1 + 3*(2 + map->source)); // "1" or "4"
+            if (div > 0) graphics.printf("/%2d", div);
+            else graphics.printf("x%2d", -div);
             break;
           }
           default:

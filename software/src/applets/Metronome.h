@@ -45,20 +45,24 @@ public:
             if (HS::clock_m.Tock(hemisphere*2)) {
               ClockOut(0);
             }
-            if (HS::clock_m.EndOfBeat(hemisphere) || HS::clock_m.Tock(hemisphere*2 + 1)) {
-              ClockOut(1);
-            }
+            /* if (HS::clock_m.EndOfBeat(hemisphere) || HS::clock_m.Tock(hemisphere*2 + 1)) { ClockOut(1); } */
         }
+        GateOut(1, HS::clock_m.IsRunning());
     }
 
     void View() {
         DrawInterface();
     }
 
-    void OnButtonPress() { }
+    void OnButtonPress() {
+      ++cursor %= 2;
+    }
 
     void OnEncoderMove(int direction) {
-        HS::clock_m.SetTempoBPM(clock_m.GetTempo() + direction);
+      if (cursor)
+        HS::clock_m.SetMultiply(HS::clock_m.GetMultiply(io_offset) + direction, io_offset);
+      else
+        HS::clock_m.SetTempoBPM(HS::clock_m.GetTempo() + direction);
     }
 
     uint64_t OnDataRequest() {
@@ -71,18 +75,19 @@ public:
 protected:
   void SetHelp() {
     //                    "-------" <-- Label size guide
-    help[HELP_DIGITAL1] = "";
+    help[HELP_DIGITAL1] = "Clock";
     help[HELP_DIGITAL2] = "";
     help[HELP_CV1]      = "Tempo";
     help[HELP_CV2]      = "Swing";
     help[HELP_OUT1]     = "Mult";
-    help[HELP_OUT2]     = "Beat";
+    help[HELP_OUT2]     = "RUN";
     help[HELP_EXTRA1] = "Set: Tempo";
     help[HELP_EXTRA2] = "";
     //                  "---------------------" <-- Extra text size guide
   }
 
 private:
+    uint8_t cursor = 0;
     void DrawInterface() {
         gfxIcon(1, 15, NOTE4_ICON);
         gfxPrint(9, 15, "= ");
@@ -92,8 +97,17 @@ private:
         gfxPrint(46, 25, HS::clock_m.shuffle);
         gfxPrint("%");
 
-        gfxPrint(1, 55, "x");
-        gfxPrint(HS::clock_m.GetMultiply(hemisphere*2));
+        int mult = HS::clock_m.GetMultiply(hemisphere*2);
+        if (0 != mult || 0 != cursor) { // hide if 0
+            gfxPrint(1, 55, (mult >= 0) ? "x" : "/");
+            gfxPrint( (mult >= 0) ? mult : 1 - mult );
+        }
+
+        if (cursor)
+          gfxIcon(1, 46, DOWN_ICON);
+        else
+          gfxIcon(1, 24, UP_ICON);
+
         DrawMetronome();
     }
 

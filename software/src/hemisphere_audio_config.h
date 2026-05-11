@@ -1,5 +1,6 @@
 #pragma once
 
+#include "src/Audio/filter_variable2.h"
 #include "AudioAppletSubapp.h"
 #include "audio_applets/CrosspanApplet.h"
 #include "audio_applets/DelayApplet.h"
@@ -13,31 +14,53 @@
 #include "audio_applets/UpsampledApplet.h"
 #include "audio_applets/VCAApplet.h"
 #include "audio_applets/WAVPlayerApplet.h"
+#include "audio_applets/HandSawApplet.h"
+#include "audio_applets/FreeverbApplet.h"
+#include "audio_applets/SamverbApplet.h"
+#include "audio_applets/PhaserApplet.h"
+#include "audio_applets/ThreeBandz.h"
 
 const size_t NUM_SLOTS = 5;
 
-DMAMEM std::tuple<InputApplet<MONO>, UpsampledApplet<MONO>, OscApplet, WavPlayerApplet<MONO>>
-  mono_input_pool[2];
-DMAMEM std::
-  tuple<InputApplet<STEREO>, WavPlayerApplet<STEREO>, UpsampledApplet<STEREO>>
+Factory<AudioEffectReverbSchroeder, 8> HemisphereAudioApplet::bung_factory;
+Factory<AudioEffectFreeverb, 8> HemisphereAudioApplet::verb_factory;
+
+DMAMEM std::tuple<
+  PassthruApplet<MONO>,
+  InputApplet<MONO>,
+  HandSawApplet,
+  UpsampledApplet<MONO>,
+  OscApplet,
+  WavPlayerApplet<MONO>>
+    mono_input_pool[2];
+DMAMEM std::tuple<
+  PassthruApplet<STEREO>,
+  InputApplet<STEREO>,
+  WavPlayerApplet<STEREO>,
+  UpsampledApplet<STEREO>>
     stereo_input_pool;
 DMAMEM std::tuple<
   PassthruApplet<MONO>,
-  DynamicsApplet<MONO>,
   InputApplet<MONO>,
   OscApplet,
-  DelayApplet<MONO>,
-  LadderApplet<MONO>,
-  FilterFolderApplet<MONO>,
+  HandSawApplet,
   WavPlayerApplet<MONO>,
   VcaApplet<MONO>,
+  LadderApplet<MONO>,
+  FilterFolderApplet<MONO>,
+  DelayApplet<MONO>,
+  PhazerApplet,
+  ReverbApplet,
+  BungverbApplet,
+  DynamicsApplet<MONO>,
   UpsampledApplet<MONO>>
-  mono_processors_pool[2][NUM_SLOTS - 1];
+    mono_processors_pool[2][NUM_SLOTS - 1];
 DMAMEM std::tuple<
   PassthruApplet<STEREO>,
   CrosspanApplet,
   MidSideApplet,
   DynamicsApplet<STEREO>,
+  ThreeBandzApplet,
   InputApplet<STEREO>,
   DelayApplet<STEREO>,
   LadderApplet<STEREO>,
@@ -45,7 +68,7 @@ DMAMEM std::tuple<
   FilterFolderApplet<STEREO>,
   WavPlayerApplet<STEREO>,
   UpsampledApplet<STEREO>>
-  stereo_processors_pool[NUM_SLOTS - 1];
+    stereo_processors_pool[NUM_SLOTS - 1];
 
 // Helper to extract the tuple type from an array... thanks ChatGPT...
 template <typename ArrayType>

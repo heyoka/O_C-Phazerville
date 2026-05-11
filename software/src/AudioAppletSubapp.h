@@ -7,8 +7,12 @@
 #include "PhzConfig.h"
 #include "UI/ui_events.h"
 #include "util/util_tuples.h"
-#include <Audio.h>
-#include <cstdint>
+#include "dsputils_arm.h"
+#include "Audio/AudioMixer.h"
+#include "Audio/AudioPassthrough.h"
+#include "Audio/AudioVCA.h"
+#include "Audio/InterpolatingStream.h"
+
 
 #define ForEachSide(ch) for (HEM_SIDE ch : {LEFT_HEMISPHERE, RIGHT_HEMISPHERE})
 
@@ -57,6 +61,11 @@ public:
     selected_mono_applets[0].fill(0);
     selected_mono_applets[1].fill(0);
     selected_stereo_applets.fill(0);
+
+    // Input applet for top slots
+    selected_mono_applets[0][0] = 1;
+    selected_mono_applets[1][0] = 1;
+    selected_stereo_applets[0] = 1;
   }
 
   void Init() {
@@ -75,11 +84,22 @@ public:
     peak_conns[1][0].connect(OC::AudioIO::InputStream(), 1, peaks[1][0], 0);
   }
 
+  void ReInit() {
+    for (size_t slot = 0; slot < Slots; slot++) {
+      // reset to defaults here
+      if (IsStereo(slot)) {
+        ChangeStereoApplet(LEFT_HEMISPHERE, slot, slot ? 0 : 1);
+        stereo ^= 1 << slot; // change it back to dual mono
+        SwapMonoStereo(slot);
+      }
+      ForEachSide(side) {
+        ChangeMonoApplet(side, slot, slot ? 0 : 1); // Input for top slots
+      }
+    }
+  }
+
   void Controller() {
     AudioNoInterrupts();
-    // Call Controller instead of BaseController so we don't trigger
-    // cursor_countdown multiple times. This is a stupid hack and we should do
-    // something smarter.
     for (size_t i = 0; i < Slots; i++) {
       if (IsStereo(i)) {
         get_selected_stereo_applet(i).Controller();
@@ -108,10 +128,9 @@ public:
     }
 
     ForEachSide(side) {
-      HEM_SIDE s = static_cast<HEM_SIDE>(side);
       if (state[side] == EDIT_APPLET) {
-        HemisphereApplet& applet = get_selected_applet(s);
-        applet.SetDisplaySide(s);
+        HemisphereApplet& applet = get_selected_applet(side);
+        applet.SetDisplaySide(static_cast<HEM_SIDE>(side + AUDIO_SLOT_L));
         applet.BaseView();
       } else {
         int y = cursor[side] * 10 + 14;
@@ -124,7 +143,7 @@ public:
           gfxIcon(120 * side, y + 1, side ? LEFT_ICON : RIGHT_ICON);
         }
         for (uint_fast8_t slot = 0; slot < Slots + 1; slot++) {
-          draw_peak(s, slot);
+          draw_peak(side, slot);
         }
 
         gfxPos(1 + 64 * side, 2);
@@ -176,18 +195,20 @@ public:
     return false;
   }
 
-  void SetupMonoStereo(int c) {
+  void SwapMonoStereo(int c) {
     if (IsStereo(c)) {
-      get_selected_stereo_applet(c).BaseStart(LEFT_HEMISPHERE);
+      get_selected_stereo_applet(c).BaseStart(LEFT_HEMISPHERE + AUDIO_SLOT_L);
       ForEachSide(side) {
+        get_selected_mono_applet(side, c).Disconnect();
         get_selected_mono_applet(side, c).Unload();
         ConnectStereoToNext(side, c);
         if (c > 0) ConnectSlotToNext(side, c - 1);
       }
     } else {
+      get_selected_stereo_applet(c).Disconnect();
       get_selected_stereo_applet(c).Unload();
       ForEachSide(side) {
-        get_selected_mono_applet(side, c).BaseStart(side);
+        get_selected_mono_applet(side, c).BaseStart(side + AUDIO_SLOT_L);
         ConnectMonoToNext(side, c);
         if (c > 0) ConnectSlotToNext(side, c - 1);
       }
@@ -201,7 +222,7 @@ public:
         int c = cursor[0];
         stereo ^= 1 << c;
 
-        SetupMonoStereo(c);
+        SwapMonoStereo(c);
       }
       // Prevent press detection when doing a button combo
       ready_for_press = false;
@@ -226,7 +247,10 @@ public:
       case SWITCH_APPLET:
         if (IsStereo(c)) ChangeStereoApplet(side, c, candidate[side]);
         else ChangeMonoApplet(side, c, candidate[side]);
-        state[side] = EDIT_APPLET;
+        if (candidate[side])
+          state[side] = EDIT_APPLET;
+        else // don't edit the PassthruApplet (index 0)
+          state[side] = MOVE_CURSOR;
         break;
       case EDIT_APPLET:
         get_selected_applet(side).OnButtonPress();
@@ -237,10 +261,11 @@ public:
   void ChangeStereoApplet(HEM_SIDE side, size_t slot, int ix) {
     int& sel = selected_stereo_applets[slot];
     if (ix == sel) return;
+    get_selected_stereo_applet(slot).Disconnect();
     get_selected_stereo_applet(slot).Unload();
     sel = ix;
     auto& app = get_selected_stereo_applet(slot);
-    app.BaseStart(side);
+    app.BaseStart(side + AUDIO_SLOT_L);
     ForEachSide(side) ConnectStereoToNext(side, slot);
     if (slot > 0) {
       ForEachSide(side) ConnectSlotToNext(side, slot - 1);
@@ -250,10 +275,11 @@ public:
   void ChangeMonoApplet(HEM_SIDE side, size_t slot, int ix) {
     int& sel = selected_mono_applets[side][slot];
     if (ix == sel) return;
+    get_selected_mono_applet(side, slot).Disconnect();
     get_selected_mono_applet(side, slot).Unload();
     sel = ix;
     auto& app = get_selected_mono_applet(side, slot);
-    app.BaseStart(side);
+    app.BaseStart(side + AUDIO_SLOT_L);
     ConnectMonoToNext(side, slot);
     if (slot > 0) ConnectSlotToNext(side, slot - 1);
   }
@@ -362,7 +388,7 @@ public:
 
       if (IsStereo(slot)) {
         if (0 == ((oldstereo >> slot) & 1)) {
-          SetupMonoStereo(slot);
+          SwapMonoStereo(slot);
         }
         data = 0; // Default to input/passthrough if nothing is found.
         // stereo applets
@@ -381,7 +407,7 @@ public:
         }
       } else {
         if ((oldstereo >> slot) & 1) {
-          SetupMonoStereo(slot);
+          SwapMonoStereo(slot);
         }
         // mono applets
         ForEachSide(ch) {
@@ -461,6 +487,7 @@ public:
     for (uint_fast8_t i = 0; i < APPLET_CONFIG_SIZE; ++i) {
       // We default to 0, so may as well skip them to save space
       if (data[i]) PhzConfig::setValue(key + i, data[i]);
+      else PhzConfig::deleteKey(key + i); // clears old unused data
       Serial.printf(" | data[%u]=", i);
       Serial.print(data[i], HEX);
     }
@@ -508,8 +535,6 @@ private:
   int cursor[2]; // selected slot for each side
   // candidate applet for each side, referenced by index into applets arrays
   int candidate[2];
-
-  int cursor_countdown;
 
   HemisphereAudioApplet& get_mono_applet(
     HEM_SIDE side, size_t slot, size_t ix

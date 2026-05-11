@@ -93,8 +93,17 @@ static PROGMEM const uint8_t adc2_pin_to_channel[] = {
 {
   if (flip180) {
 #if defined(__IMXRT1062__) && defined(ARDUINO_TEENSY41)
-    ADC_CHANNEL_1=7, ADC_CHANNEL_2=6, ADC_CHANNEL_3=5, ADC_CHANNEL_4=4;
-    ADC_CHANNEL_5=3, ADC_CHANNEL_6=2, ADC_CHANNEL_7=1, ADC_CHANNEL_8=0;
+    ADC_CHANNEL temp1 = ADC_CHANNEL_1, temp2 = ADC_CHANNEL_2,
+                temp3 = ADC_CHANNEL_3, temp4 = ADC_CHANNEL_4;
+
+    ADC_CHANNEL_1 = ADC_CHANNEL_8;
+    ADC_CHANNEL_2 = ADC_CHANNEL_7;
+    ADC_CHANNEL_3 = ADC_CHANNEL_6;
+    ADC_CHANNEL_4 = ADC_CHANNEL_5;
+    ADC_CHANNEL_5 = temp4;
+    ADC_CHANNEL_6 = temp3;
+    ADC_CHANNEL_7 = temp2;
+    ADC_CHANNEL_8 = temp1;
 #else
     ADC_CHANNEL_1=3, ADC_CHANNEL_2=2, ADC_CHANNEL_3=1, ADC_CHANNEL_4=0;
 #endif
@@ -366,6 +375,11 @@ static void Init_Teensy41_ADC33131D_chip() {
 
   // configure FlexIO timers
   IMXRT_FLEXIO_t *flexio = (IMXRT_FLEXIO_t *)IMXRT_FLEXIO2_ADDRESS;
+  // disable and reset, in case of re-init
+  flexio->CTRL &= ~FLEXIO_CTRL_FLEXEN;
+  flexio->CTRL |= FLEXIO_CTRL_SWRST;
+  flexio->CTRL &= ~FLEXIO_CTRL_SWRST;
+
   const int baud_timer = 0;
   const int cs_timer = 1;
   const int mux_timer = 2;
@@ -431,7 +445,7 @@ static void Init_Teensy41_ADC33131D_chip() {
 
   // use a DMA channel to capture FlexIO output
   dma0.begin();
-  dma0.TCD->SADDR = &(((IMXRT_FLEXIO_t *)IMXRT_FLEXIO2_ADDRESS)->SHIFTBUFBIS[data_shifter]);
+  dma0.TCD->SADDR = &(flexio->SHIFTBUFBIS[data_shifter]);
   dma0.TCD->SOFF = 0;
   dma0.TCD->ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
   dma0.TCD->NBYTES_MLNO = DMA_TCD_NBYTES_MLOFFYES_NBYTES(2);

@@ -1,5 +1,7 @@
 #include <Arduino.h>
+#include "HSClockManager.h"
 #include "OC_core.h"
+#include "SegmentDisplay.h"
 #include "tideslite.h"
 #include "OC_gpio.h"
 #include "HSUtils.h"
@@ -18,9 +20,14 @@ namespace HS {
 
   uint32_t popup_tick; // for button feedback
   PopupType popup_type = MENU_POPUP;
+  const char* popup_msg;
+  ErrMsgIndex msg_idx;
+
   int q_edit = 0; // edit cursor for quantizer popup, 0 = not editing
   uint8_t qview = 0; // which quantizer's setting is shown in popup
-  ErrMsgIndex msg_idx;
+
+  int midi_edit = 0;
+  uint8_t mview = 0;
 
   OC::SemitoneQuantizer input_quant[ADC_CHANNEL_LAST];
 
@@ -40,31 +47,48 @@ namespace HS {
   DigitalInputMap trigmap[ADC_CHANNEL_LAST];
   CVInputMap cvmap[ADC_CHANNEL_LAST];
   uint8_t trig_length = 10; // in ms, multiplier for HEMISPHERE_CLOCK_TICKS
-  uint8_t screensaver_mode = SCREEN_STARS; // ScreensaverMode
+  uint8_t screensaver_mode = SCREEN_BEATS; // ScreensaverMode
   const char * const ssmodes[SCREENSAVER_MODE_COUNT] = {
     "[blank]",
     "Meters", "Scope",
-    "Zaps", "Stars", "Zips",
+    "Snow!", "Stars", "Zips",
+    "Beats",
   };
 
   OC::menu::ScreenCursor<5> showhide_cursor;
 
+  FLASHMEM
   void Init() {
     for (auto &iq : input_quant)
       iq.Init();
 
-    for (auto &q : q_engine)
-      q.quantizer.Init();
+    for (int i = 0; i < QUANT_CHANNEL_COUNT; ++i) {
+      q_engine[i].quantizer.Init();
+      q_engine[i].Configure( (i<4)? OC::Scales::SCALE_SEMI : i-4, 0xffff);
+    }
 
+    ResetMappings();
+  }
+  void ResetMappings() {
     for (int i = 0; i < APPLET_SLOTS * 2; ++i) {
       trigmap[i].source = (i%4) + 1;
+      trigmap[i].Reset(true);
       cvmap[i].source = i + 1;
+      cvmap[i].attenuversion = 60;
+      frame.output_slew[i] = 0;
+      frame.output_atten[i] = 60;
+      frame.clockskip[i] = 0;
       clock_m.SetMultiply(0, i);
     }
   }
 
+  void PokePopup(PopupType pop, const char* msg) {
+    popup_msg = msg;
+    popup_type = pop;
+    popup_tick = OC::CORE::ticks;
+  }
   void PokePopup(PopupType pop, ErrMsgIndex err) {
-    msg_idx = err;
+    popup_msg = OC::Strings::err_msg[err];
     popup_type = pop;
     popup_tick = OC::CORE::ticks;
   }
@@ -84,6 +108,9 @@ namespace HS {
   }
 
   // --- Quantizer helpers
+  QuantEngine& GetQuantEngine(int ch) {
+    return q_engine[ch];
+  }
   int GetLatestNoteNumber(int ch) {
     return q_engine[ch].quantizer.GetLatestNoteNumber();
   }
@@ -163,6 +190,48 @@ namespace HS {
       } else { // edit mask bits
         const int idx = q_edit - 4;
         q_engine[qview].EditMask(idx, dir>0);
+        q_engine[qview].Reconfig();
+      }
+    }
+  }
+  // -----
+  void MidiMapEdit(int ch) {
+    mview = constrain(ch, 0, MIDIMAP_MAX - 1);
+    midi_edit = 1;
+  }
+  enum MEditCursor {
+    OFF, CHANNEL,
+    MODE,
+    VOICE,
+    RANGELOW, RANGEHIGH,
+
+    MEDITCURSOR_COUNT
+  };
+  void MEditEncoderMove(bool rightenc, int dir) {
+    if (!rightenc) {
+      // left encoder moves midi_edit cursor
+      midi_edit = constrain(midi_edit + dir, 1, MEDITCURSOR_COUNT-1);
+    } else {
+      MIDIMapping &map = frame.MIDIState.mapping[mview];
+      // right encoder is delegated
+      switch(midi_edit){
+        case 1: // chan
+          map.AdjustChannel(dir);
+          frame.MIDIState.UpdateMidiChannelFilter();
+          break;
+        case 2: // mode
+          map.AdjustFunction(dir);
+          frame.MIDIState.UpdateMidiChannelFilter();
+          break;
+        case 3: // voice (poly only)
+          map.AdjustVoice(dir);
+          break;
+        case 4: // low
+          map.AdjustRangeLow(dir);
+          break;
+        case 5: // high
+          map.AdjustRangeHigh(dir);
+          break;
       }
     }
   }
@@ -170,6 +239,7 @@ namespace HS {
   void DrawPopup(const int config_cursor, const int preset_id, const bool blink) {
 
     enum ConfigCursor {
+        DELETE_PRESET,
         LOAD_PRESET, SAVE_PRESET,
         AUTO_SAVE,
         CONFIG_DUMMY, // past this point goes full screen
@@ -182,28 +252,27 @@ namespace HS {
     CLOCK_POPUP,
     PRESET_POPUP,
     QUANTIZER_POPUP,
+    MIDI_POPUP,
     MESSAGE_POPUP,
     */
-    if (popup_type == MENU_POPUP) {
-      px = 73;
-      py = 25;
-      pw = 54;
-      ph = 38;
-    } else if (popup_type == QUANTIZER_POPUP) {
-      px = 20;
-      py = 23;
-      pw = 88;
-      ph = 28;
-    } else if (popup_type == MESSAGE_POPUP) {
-      px = 16;
-      py = 23;
-      pw = 96;
-      ph = 18;
-    } else {
-      px = 23;
-      py = 23;
-      pw = 82;
-      ph = 18;
+    switch (popup_type) {
+      case MENU_POPUP:
+        px = 73; py = 25;
+        pw = 54; ph = 38;
+        break;
+      case MIDI_POPUP:
+      case QUANTIZER_POPUP:
+        px = 20; py = 23;
+        pw = 88; ph = 28;
+        break;
+      case MESSAGE_POPUP:
+        px = 16; py = 23;
+        pw = 96; ph = 18;
+        break;
+      default:
+        px = 23; py = 23;
+        pw = 82; ph = 18;
+        break;
     }
 
     graphics.clearRect(px, py, pw, ph);
@@ -213,14 +282,14 @@ namespace HS {
     switch (popup_type) {
       default:
       case MESSAGE_POPUP:
-        gfxPrint(OC::Strings::err_msg[msg_idx]);
+        gfxPrint(popup_msg);
         break;
       case MENU_POPUP:
         gfxPrint(78, 30, "Load");
         gfxPrint(78, 40, config_cursor == AUTO_SAVE ? "(auto)" : "Save");
-        gfxIcon(78, 50, ZAP_ICON);
+        gfxIcon(78, 50, PhzIcons::snowflakeA);
         gfxIcon(86, 50, ZAP_ICON);
-        gfxIcon(94, 50, ZAP_ICON);
+        gfxIcon(94, 50, PhzIcons::snowflakeB);
         //gfxPrint(78, 50, "????");
 
         switch (config_cursor) {
@@ -285,7 +354,7 @@ namespace HS {
           else
             gfxIcon(22 + (q_edit-4)*5, 44, UP_BTN_ICON);
 
-          gfxInvert(20, 23, 88, 28);
+          gfxInvert(px, py, pw, ph);
 
           // context clues at top/bottom of screen
           gfxFooter("L:cursor     R:adjust");
@@ -293,6 +362,38 @@ namespace HS {
           gfxHeader("A:Oct+         B:Oct-");
         }
 
+        break;
+      }
+      case MIDI_POPUP:
+      {
+        MIDIMapping& map = frame.MIDIState.mapping[mview];
+        graphics.printf(
+          "Ch:%s  %s", midi_channels[map.channel], midi_fn_name[map.function]
+        );
+        if (map.function == HEM_MIDI_CC_OUT) gfxPrint(map.function_cc);
+
+        graphics.setPrintPos(px + 5, py + 15);
+        graphics.printf(
+          "V:%d<%s:%s>",
+          map.dac_polyvoice + 1,
+          midi_note_numbers[map.range_low],
+          midi_note_numbers[map.range_high]
+        );
+
+        if (midi_edit) {
+          if (midi_edit < 3) // chan or mode
+            gfxIcon(px + 5 + 24 * midi_edit, 35, UP_BTN_ICON);
+          else // voice, range low, range high
+            gfxIcon(px + 17 + 20 * (midi_edit - 3), 45, UP_BTN_ICON);
+
+          // context clues at top/bottom of screen
+          gfxFooter("L:cursor     R:adjust");
+          graphics.clearRect(0, 0, 128, 10);
+          gfxHeader("A:Prev   M     B:Next");
+          gfxPrint(61, 1, mview + 1);
+        }
+
+        gfxInvert(px, py, pw, ph);
         break;
       }
     }
@@ -306,6 +407,30 @@ namespace HS {
       clock_m.Start( !p );
     }
     PokePopup(CLOCK_POPUP);
+  }
+
+  bool applet_is_hidden(const int& index);
+  const char * get_applet_name(const int index);
+  const uint8_t * get_applet_icon(const int index);
+
+  void DrawAppletList(bool blink) {
+    const size_t LineH = 12;
+
+    int y = (64 - (5 * LineH)) / 2;
+
+    for (int current = showhide_cursor.first_visible();
+         current <= showhide_cursor.last_visible();
+         ++current, y += LineH) {
+
+      if (!applet_is_hidden(current))
+        gfxIcon(  12, y + 1, get_applet_icon(current));
+      gfxPrint( 23, y + 2, get_applet_name(current));
+
+      if (current == showhide_cursor.cursor_pos()) {
+        gfxIcon(1, y + 1, RIGHT_ICON);
+        if (blink) gfxInvert(0, y, 10, 10);
+      }
+    }
   }
 
 } // namespace HS
@@ -339,6 +464,42 @@ void gfxPrint(int x_adv, int num) { // Print number with character padding
     gfxPrint(num);
 }
 
+void gfxPrint(int x, int y, HS::QuantEngine &q_eng, bool overlay = true) {
+  if (overlay) {
+    graphics.clearRect(x - 2, y - 2, 29, 22);
+    gfxFrame(x - 1, y - 2, 27, 21, true);
+  }
+
+  gfxPrint(x, y, OC::scale_names_short[q_eng.scale]);
+  gfxPrint(
+    (q_eng.octave == 0 ? x + 6 : x),
+    y + 10,
+    OC::Strings::note_names_unpadded[q_eng.root_note]
+  );
+  if (q_eng.octave != 0) {
+    gfxPrint(x + 12, y + 10, q_eng.octave);
+  }
+}
+void gfxPrintScale(int x, int y, int qsel) {
+  gfxPrint(x, y, HS::q_engine[qsel]);
+}
+
+void gfxPrintIcon(const uint8_t *data, int16_t w) {
+    gfxIcon(graphics.getPrintPosX(), graphics.getPrintPosY(), data);
+    gfxPos(graphics.getPrintPosX() + w, graphics.getPrintPosY());
+}
+void gfxPrint(HS::DigitalInputMap &map) {
+  gfxPrintIcon(map.Icon());
+  if (map.Gate()) gfxInvert(graphics.getPrintPosX()-8, graphics.getPrintPosY(), 8, 8);
+}
+void gfxPrint(HS::CVInputMap &map) {
+  gfxPrintIcon(map.Icon());
+  const int xpos = graphics.getPrintPosX() - 1;
+  const int ypos = graphics.getPrintPosY() + 4;
+  const int height = map.InRescaled(24);
+  gfxLine(xpos, ypos, xpos, ypos - height);
+}
+
 /* Convert CV value to voltage level and print  to two decimal places */
 void gfxPrintVoltage(int cv) {
     int v = (cv * (NorthernLightModular? 120 : 100)) / (12 << 7);
@@ -364,6 +525,11 @@ void gfxPrintFreqFromPitch(int16_t pitch) {
     denom = t;
   }
   int int_part = num / denom;
+  bool minutes = (swap && int_part > 600);
+  if (minutes) {
+    denom *= 60;
+    int_part = num / denom;
+  }
   int digits = 0;
   if (int_part < 10)
     digits = 1;
@@ -385,7 +551,7 @@ void gfxPrintFreqFromPitch(int16_t pitch) {
     digits++;
   }
   if (swap) {
-    gfxPrint("s");
+    gfxPrint(minutes ? "m" : "s");
   } else {
     gfxPrint("Hz");
   }
@@ -459,4 +625,109 @@ void gfxFooter(const char *str, const uint8_t *icon) {
     x += 8;
   }
   gfxPrint(x, 56, str);
+}
+
+// --- Phazerville Screensaver Library ---
+struct Zap {
+    int x = 12800;
+    int y = 6400;
+    int x_v = 6;
+    int y_v = 3;
+    uint16_t flip = 0;
+
+    void Flip() {
+      flip = random(0xffff);
+      Drift();
+    }
+    void Move(bool stars) {
+        if (stars) Move(6100, 2900);
+        else Move();
+    }
+    void Move(int target_x = -1, int target_y = -1) {
+        x += x_v;
+        y += y_v;
+        if (x > 12700 || x < 0 || y > 6300 || y < 0) {
+            if (target_x < 0 || target_y < 0) {
+                x = random(12700);
+                y = 0; // from the top
+                y_v = 5 + random(10); // only falling
+            } else {
+                x = target_x + random(400);
+                y = target_y + random(400);
+                CONSTRAIN(x, 0, 12700);
+                CONSTRAIN(y, 0, 6300);
+                y_v = random(31) - 15;
+            }
+
+            x_v = random(51) - 25;
+            if (x_v == 0) ++x_v;
+            if (y_v == 0) ++y_v;
+        }
+    }
+    void Drift() {
+      // Snow drifts randomly as it falls
+      x_v += random(3) - 1;
+      CONSTRAIN(x_v, -5, 5);
+    }
+};
+static constexpr int HOW_MANY_ZAPS = 30;
+Zap zaps[HOW_MANY_ZAPS];
+void ZapScreensaver(const uint8_t stars) {
+  static int frame_delay = 0;
+  static elapsedMillis timer = 0;
+  const uint8_t* flake_icon[] = {
+    PhzIcons::snowflakeA,
+    PhzIcons::snowflakeB,
+    PhzIcons::snowflakeC,
+    ZAP_ICON
+  };
+
+  if (stars == 0 && timer > 100) {
+    for (int i = 0; i < 10; i++) {
+      zaps[i].Flip();
+    }
+    timer = 0;
+  }
+  for (int i = 0; i < (stars ? HOW_MANY_ZAPS : 10); i++) {
+    if (frame_delay & 0x1) {
+      if (stars > 1) {
+        // Zips respawn from their previous sibling
+        if (0 == i) zaps[0].Move();
+        else zaps[i].Move(zaps[i-1].x, zaps[i-1].y);
+      } else
+        zaps[i].Move(stars == 1); // centered starfield
+    }
+
+    if (stars && frame_delay == 0) {
+      // accel
+      zaps[i].x_v *= 2;
+      zaps[i].y_v *= 2;
+    }
+
+    if (stars)
+      gfxPixel(zaps[i].x/100, zaps[i].y/100);
+    else {
+      const uint8_t idx = (zaps[i].flip > OC::CORE::FreeRam()) ? 3 : (zaps[i].flip % 3);
+      gfxIcon(zaps[i].x/100, zaps[i].y/100, flake_icon[idx]);
+    }
+  }
+  if (--frame_delay < 0) frame_delay = 100;
+}
+
+void BeatCounterScreensaver() {
+  static SegmentDisplay digits{BIG_SEGMENTS};
+  const int y = 27;
+
+  if (HS::clock_m.IsRunning()) {
+    gfxIcon(60, 10, HS::clock_m.Cycle() ? METRO_L_ICON : METRO_R_ICON);
+  }
+
+  // 4-bar phrases
+  digits.PrintWhole(12, y, HS::clock_m.beat_count / 16 + 1, 100);
+  gfxRect(48, y+8, 3, 3);
+  // bars (measures)
+  digits.PrintDigit(64, y, HS::clock_m.beat_count / 4 % 4 + 1);
+  gfxRect(80, y+8, 3, 3);
+  // beats
+  digits.PrintDigit(96, y, HS::clock_m.beat_count % 4 + 1);
 }

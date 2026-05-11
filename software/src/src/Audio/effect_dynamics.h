@@ -31,13 +31,13 @@
 
 #if !defined(KINETISL)
 
-#include "Arduino.h"
-#include "AudioStream.h"
+#include <Arduino.h>
+#include <AudioStream.h>
 
-#define MIN_DB	-110.0f
+#define MIN_DB	-90.0f
 #define MAX_DB	0.0f
 
-#define MIN_T	0.03f  //Roughly 1 block
+#define MIN_T	0.003f
 #define MAX_T	4.00f
 
 #define RATIO_OFF		1.0f
@@ -64,7 +64,7 @@ public:
 	}
 
 	void Release() {
-		delete samplesSquared;
+		delete[] samplesSquared;
 	}
 
 	//Sets the gate parameters.
@@ -91,7 +91,7 @@ public:
 	//attack and release are in seconds
 	//ratio is expressed as x:1 i.e. 1 for no compression, 60 for brickwall limiting
 	//Set kneeWidth to 0 for hard knee
-	void compression(float threshold = -40.0f, float attack = MIN_T, float release = 0.5f, float ratio = 35.0f, float kneeWidth = 6.0f) {
+	void compression(float threshold = -40.0f, float attack = 0.05f, float release = 0.5f, float ratio = 35.0f, float kneeWidth = 6.0f) {
 
 		compEnabled = threshold < MAX_DB;
 
@@ -145,7 +145,7 @@ public:
 	void makeupGain(float gain = 0.0f) {
 
 		mgAutoEnabled = false;
-		makeupdb = constrain(gain, -12.0f, 24.0f);
+		makeupdb = constrain(gain, -12.0f, 30.0f);
 	}
 
 private:
@@ -186,7 +186,8 @@ private:
 	float aOneMinusLimitAttack;
 	float aLimitRelease;
 	const static unsigned int sampleBufferSize = AUDIO_SAMPLE_RATE / 10; // number of samples to use for running RMS calulation = 1/10th of a second
-	u_int64_t sumOfSamplesSquared = 0;
+	static constexpr float invSampleBufferSize = 1.0f / (float)sampleBufferSize;
+	uint64_t sumOfSamplesSquared = 0;
 	uint32_t* samplesSquared;
 	uint16_t sampleIndex = 0;
 

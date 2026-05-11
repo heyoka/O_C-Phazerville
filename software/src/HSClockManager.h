@@ -28,6 +28,8 @@
 
 #include "OC_core.h"
 #include "HSMIDI.h"
+#include <functional>
+#include <vector>
 
 namespace HS {
 
@@ -68,6 +70,7 @@ public:
     bool extsync = false; // locked into an external clock; will stop after timeout
     uint32_t clock_tick[2] = {0,0}; // previous ticks when a physical clock was received on DIGITAL 1
     uint32_t beat_tick = 0; // The tick to count from
+    uint32_t beat_count = 0;
     bool tock[NR_OF_CLOCKS] = {0,0,0,0,0,0,0,0,0}; // The current tock value
     int8_t tocks_per_beat[NR_OF_CLOCKS] = {0,0, 0,0, 0,0, 0,0, MIDI_OUT_PPQN}; // Multiplier
     int count[NR_OF_CLOCKS] = {0,0,0,0, 0,0,0,0, 0}; // Multiple counter, 0 is a special case when first starting the clock
@@ -79,7 +82,7 @@ public:
 
     bool boop[8] = {0,0,0,0,0,0,0,0}; // Manual triggers
 
-    void (*sync_func)(); // callback function
+    std::queue<Task> syncfn_queue;
 
     ClockManager() {
         SetTempoBPM(120);
@@ -133,37 +136,46 @@ public:
     float GetTempoFloat() {
       return 1000000.0f / ticks_per_beat;
     }
+    uint32_t GetTempoTicks() {return ticks_per_beat;}
     uint32_t GetCycleTicks(int ch = 0) {
       if (tocks_per_beat[ch] > 0) return ticks_per_beat / tocks_per_beat[ch];
       if (tocks_per_beat[ch] < 0) return ticks_per_beat * (1 - tocks_per_beat[ch]);
       return 0;
     }
 
-    void BeatSync(void (*func)()) {
-      sync_func = func;
+    void BeatSync(std::function<void()> func) {
+      // TODO: prevent duplicates...
+      syncfn_queue.emplace(func);
     }
     void ProcessBeatSync() {
+      if (syncfn_queue.empty()) return;
       // Things that should only happen on the downbeat
       // such as: preset load, multiplier change, etc...
-      // TODO: form a queue
-      if (sync_func != nullptr) {
-        sync_func();
-        sync_func = nullptr;
+      while (!syncfn_queue.empty()) {
+        syncfn_queue.front()();
+        syncfn_queue.pop();
       }
     }
 
+    const uint32_t BeatTick() const {
+      return beat_tick; // + beat_count * ticks_per_beat;
+    }
     // Reset - Resync multipliers, optionally skipping the first tock
     void Reset(bool count_skip = 0) {
-        beat_tick = OC::CORE::ticks;
-        if (0 == count_skip) {
-            clock_tick[0] = 0;
-            clock_tick[1] = 0;
-        }
-        for (int ch = 0; ch < NR_OF_CLOCKS; ch++) {
-            if (tocks_per_beat[ch] > 0 || 0 == count_skip) count[ch] = count_skip;
-        }
+      ++beat_count;
+      beat_tick = OC::CORE::ticks;
+      if (!count_skip) {
+        beat_count = 0;
+        clock_tick[0] = 0;
+        clock_tick[1] = 0;
+        cycle = 1;
+      }
 
-        cycle = 1 - cycle;
+      for (int ch = 0; ch < NR_OF_CLOCKS; ch++) {
+        if (tocks_per_beat[ch] > 0 || !count_skip) count[ch] = count_skip;
+      }
+
+      cycle = 1 - cycle;
     }
 
     // Nudge - Used to align the internal clock with incoming clock pulses
@@ -171,13 +183,17 @@ public:
     void Nudge(int diff) {
         if (diff > 0) diff--;
         if (diff < 0) diff++;
-        beat_tick += diff;
+        beat_tick += diff; // hmmmm
     }
 
     // call this on every tick when clock is running, before all Controllers
     void SyncTrig(bool clocked, bool midi_sync = false) {
         const uint32_t now = OC::CORE::ticks;
+        if (midi_sync) DisableMIDIOut();
         const int ppqn = (midi_sync || !midi_out_enabled) ? MIDI_CLOCK_PPQN : clock_ppqn;
+
+        // don't sync to non-MIDI triggers if MIDI sync is active
+        if (!midi_sync && !midi_out_enabled) clocked = false;
 
         // Reset only when all multipliers have been met
         bool reset = 1;
@@ -191,18 +207,21 @@ public:
             }
 
             if (tocks_per_beat[ch] > 0) { // multiply
-                uint32_t next_tock_tick = beat_tick + count[ch]*ticks_per_beat / static_cast<uint32_t>(tocks_per_beat[ch]);
+                uint32_t next_tock_tick = BeatTick() + count[ch]*ticks_per_beat / static_cast<uint32_t>(tocks_per_beat[ch]);
                 if (shuffle && MIDI_CLOCK != ch && count[ch] % 2 == 1 && count[ch] < tocks_per_beat[ch])
                     next_tock_tick += shuffle * ticks_per_beat / 100 / static_cast<uint32_t>(tocks_per_beat[ch]);
 
                 tock[ch] = now >= next_tock_tick;
-                if (tock[ch]) ++count[ch]; // increment multiplier counter
+                if (tock[ch]) {
+                  ++count[ch]; // increment multiplier counter
+                  if (1 == count[ch]) beatsync = 1;
+                }
 
                 beatsync = beatsync || (count[ch] > tocks_per_beat[ch]); // multiplier has been exceeded
                 reset = reset && (count[ch] > tocks_per_beat[ch]);
             } else { // division: -1 becomes /2, -2 becomes /3, etc.
                 int div = 1 - tocks_per_beat[ch];
-                uint32_t next_beat = beat_tick + (count[ch] ? ticks_per_beat : 0);
+                uint32_t next_beat = BeatTick() + (count[ch] ? ticks_per_beat : 0);
                 bool beat_exceeded = (now >= next_beat);
                 if (beat_exceeded) {
                     ++count[ch];
@@ -219,7 +238,8 @@ public:
 
         }
         if (reset) Reset(1); // skip the one we're already on
-        if (beatsync) ProcessBeatSync();
+        if (beatsync && !syncfn_queue.empty())
+          ProcessBeatSync();
 
         // handle syncing to physical clocks
         if (clocked && clock_tick[tickno] && ppqn) {
@@ -243,7 +263,7 @@ public:
                 int ticks_per_clock = ticks_per_beat / ppqn; // rounded down
 
                 // time since last beat
-                int tick_offset = now - beat_tick;
+                int tick_offset = now - BeatTick();
 
                 // too long ago? time til next beat
                 if (tick_offset > ticks_per_clock / 2) tick_offset -= ticks_per_beat;
@@ -296,6 +316,7 @@ public:
 #endif
 #endif
         }
+        EnableMIDIOut();
     }
 
     void Pause() {paused = 1;}
@@ -306,9 +327,9 @@ public:
       ticks_per_beat = 1000000 / tempo;
     }
 
-    bool IsRunning() {return (running && !paused);}
+    bool IsRunning() const {return (running && !paused);}
 
-    bool IsPaused() {return paused;}
+    bool IsPaused() const {return paused;}
 
     // beep boop
     void Boop(int ch = 0) {
@@ -323,17 +344,17 @@ public:
     }
 
     /* Returns true if the clock should fire on this tick, based on the current tempo and multiplier */
-    bool Tock(int ch = 0) {
+    bool Tock(int ch = 0) const {
         return tock[ch];
     }
 
     // Returns true if MIDI Clock should be sent on this tick
-    bool MIDITock() {
+    bool MIDITock() const {
         return midi_out_enabled && Tock(MIDI_CLOCK);
     }
 
-    bool EndOfBeat(int ch = 0) {
-      return beat_tick == OC::CORE::ticks;
+    bool EndOfBeat(int ch = 0) const {
+      return BeatTick() == OC::CORE::ticks;
     }
 
     bool Cycle(int ch = 0) {return cycle;}
